@@ -9,12 +9,10 @@ from flask import Flask, request, jsonify
 from flask_cors import CORS
 
 # Load environment variables from .env file if it exists
-try:
-    from dotenv import load_dotenv
-    load_dotenv()
-except ImportError:
-    # dotenv not installed, skip loading .env file
-    pass
+
+from dotenv import load_dotenv
+load_dotenv()
+
 
 
 from ChatOpenAI import ChatOpenAI, ChatPromptTemplate, StrOutputParser, RunnablePassthrough
@@ -30,7 +28,7 @@ API_HEADERS = {
     "Accept-Encoding": "gzip, deflate, br",
     "Connection": "keep-alive",
     "x-org-id": "6617aafc195dea3f1dbdd894",
-    "zigment-x-api-key": os.getenv("ZIGMENT_API_KEY", "")
+    "zigment-x-api-key": os.environ.get("ZIGMENT_API_KEY")
 }
 
 # NoQL Direct Prompt for complex query generation
