@@ -16,23 +16,11 @@ except ImportError:
     # dotenv not installed, skip loading .env file
     pass
 
-# Debug print for server-level MySQL URI used for SHOW DATABASES checks
-try:
-    _server_uri = os.getenv("MYSQL_SERVER_URI")
-
-except Exception:
-    pass
-
-import warnings
-from sqlalchemy import exc as sa_exc
-
-# Suppress SQLAlchemy warnings for unrecognized column types (spatial, binary, etc.)
-warnings.filterwarnings('ignore', category=sa_exc.SAWarning, message='.*Did not recognize type.*')
 
 from ChatOpenAI import ChatOpenAI, ChatPromptTemplate, StrOutputParser, RunnablePassthrough
 # from sql_database import SQLDatabase  # Commented out - using API instead
 
-# API configuration for NoQL
+# API configuration for NoQL database queries
 API_BASE_URL = "https://api.zigment.ai"
 API_HEADERS = {
     "Cache-Control": "no-cache",
@@ -61,6 +49,78 @@ Given the USER QUESTION below, output a VALID NoQL query that best answers the r
 - DO NOT use subqueries with FROM (SELECT...) - NoQL may not support nested queries.
 - If user wants an average of aggregated values, use existing aggregate fields when available.
 - NEVER output natural language, explanation, or comments—output ONLY the pure NoQL query.
+- **COMMUNICATION CHANNELS**: For questions about "communication channels", "messages by channel", or "channel distribution", use the `channel` field from the `chathistories` table, NOT `event_type` from `events`.
+- **DATE GROUPING**: When grouping by date/time, use `DATE_TRUNC(TO_DATE(field * 1000), 'day')` for daily grouping, `DATE_TRUNC(..., 'month')` for monthly, `DATE_TRUNC(..., 'week')` for weekly. NEVER use full timestamps for grouping as this creates unique groups for each event.
+- **WEEKLY FORMATTING**: For weekly queries, ALWAYS use `DATE_TO_STRING(DATE_TRUNC(..., 'week'), '%b %d, %Y', 'UTC')` to get readable week labels (e.g., "Jan 15, 2024"). Include both the formatted label (for display) and the numeric week_start (for ordering).
+- **DATA FILTERING**: Use `WHERE is_deleted = false` ONLY for tables that have this field! This excludes soft-deleted records and ensures accurate business data.
+  
+  **Tables WITH `is_deleted` field (ALWAYS use the filter):**
+  - ✅ `corecontacts` - Use `WHERE is_deleted = false` to exclude deleted unified contacts
+  - ✅ `events` - Use `WHERE is_deleted = false` to exclude deleted event records  
+  - ✅ `chathistories` - Use `WHERE is_deleted = false` to exclude deleted chat sessions
+  
+  **Tables WITHOUT `is_deleted` field (DO NOT use this filter):**
+  - ❌ `contacts` - No soft delete, all records are active
+  - ❌ `contacttags` - No soft delete, all tags are active
+- **NOQL SYNTAX**: Use `HOUR(TO_DATE(field * 1000))` for hour extraction. This is the correct NoQL syntax! NEVER use `EXTRACT()` - it doesn't exist in NoQL!
+- **NO BETWEEN OPERATOR**: NoQL does NOT support `BETWEEN` operator. Use `>=` and `<=` instead. Example: `HOUR(TO_DATE(timestamp * 1000)) >= 0 AND HOUR(TO_DATE(timestamp * 1000)) <= 3` instead of `HOUR(TO_DATE(timestamp * 1000)) BETWEEN 0 AND 3`.
+- **TABLE SELECTION**: For "hourly activity" or "activity for today" questions, use the `contacts` table, NOT the `events` table!
+- **WHO QUESTIONS**: For "who" questions, ALWAYS JOIN to get names! Never show just IDs - users want actual names!
+
+# TABLE USAGE GUIDE:
+**When to use each table based on the question type:**
+
+**📊 CONTACTS Table** - Use for:
+- Lead/contact counts, distributions, and analytics
+- Contact status tracking (IN_PROGRESS, CONVERTED, NOT_QUALIFIED)
+- Lead source analysis (source field)
+- Contact creation trends and timelines
+- Contact demographics (timezone, company)
+- Lead conversion funnel analysis
+- Contact engagement levels (total_messages field)
+
+**📊 EVENTS Table** - Use for:
+- User activity tracking and analytics
+- Event type distributions (PAGE_VIEW, CLICK, FORM_SUBMIT, etc.)
+- Meeting status tracking (MEETING_SCHEDULED, MEETING_ATTENDED, etc.)
+- User behavior analysis
+- Event timeline analysis
+- Activity patterns and trends
+
+**📊 CHATHISTORIES Table** - Use for:
+- Chat session analytics and message counts
+- Communication channel analysis (channel field)
+- Response tracking (first_response_received)
+- Chat engagement metrics
+- Agent performance (agent_id field)
+- Message volume analysis
+
+**📊 CONTACTTAGS Table** - Use for:
+- Contact tagging and categorization
+- Tag distribution analysis
+- Contact segmentation by tags
+
+**📊 CORECONTACTS Table** - Use for:
+- Extended contact data and lifecycle stages
+- Contact lifecycle analysis (lifecycle_stage field)
+- Advanced contact segmentation
+
+**📊 CHATHISTORYDETAILEDMESSAGES Table** - Use for:
+- Individual message analysis
+- Detailed message counts and trends
+- Message-level analytics
+
+**📊 ORGANIZATIONS Table** - Use for:
+- Company/organization data
+- Industry analysis
+- Organization size analysis
+- Company-level metrics
+
+**📊 USERS Table** - Use for:
+- User account information
+- User role analysis
+- User activity tracking
+- User performance metrics
 
 # SYNTAX REFERENCE (examples and summaries):
 - SELECT, FROM, WHERE, GROUP BY, ORDER BY, LIMIT, OFFSET (SQL-like)
@@ -72,32 +132,472 @@ Given the USER QUESTION below, output a VALID NoQL query that best answers the r
 
 # Example User Questions and Expected Queries:
 
-Q: "What is the total number of messages per user?"
+a) Q: "What is the total number of messages per user?"
 A: SELECT user_id, COUNT(*) AS total_messages FROM chathistories GROUP BY user_id ORDER BY total_messages DESC LIMIT 20
 
-Q: "What is the average number of messages per conversation?"
+b) Q: "What is the average number of messages per conversation?"
 A: SELECT contact_id, COUNT(*) AS message_count FROM chathistories GROUP BY contact_id ORDER BY message_count DESC LIMIT 20
 
-Q: "Average total messages across all chat histories"
+c) Q: "Average total messages across all chat histories"
 A: SELECT AVG(total_messages) AS avg_messages FROM chathistories
 
-Q: "Show all contacts created after Jan 1, 2024"
+d) Q: "Show all contacts created after Jan 1, 2024"
 A: SELECT * FROM contacts WHERE created_at_timestamp > 1704067200 LIMIT 50
 
-Q: "Top 5 most active agents by chats"
+e) Q: "Top 5 most active agents by chats"
 A: SELECT agent_id, COUNT(*) AS chat_count FROM chathistories GROUP BY agent_id ORDER BY chat_count DESC LIMIT 5
 
-Q: "Weekly contact creations" (or "contacts created per week")
+f) Q: "Weekly contact creations" (or "contacts created per week")
 A: SELECT WEEK(TO_DATE(created_at_timestamp * 1000)) AS week_number, COUNT(*) AS contact_count FROM contacts GROUP BY week_number ORDER BY week_number LIMIT 20
 
-Q: "Monthly message count"
+g) Q: "Monthly message count"
 A: SELECT MONTH(TO_DATE(created_at * 1000)) AS month, COUNT(*) AS message_count FROM chathistories GROUP BY month ORDER BY month LIMIT 12
 
-Q: "Contacts by day of week"
-A: SELECT DAY_OF_WEEK(TO_DATE(created_at_timestamp * 1000)) AS day_of_week, COUNT(*) AS contact_count FROM contacts GROUP BY day_of_week ORDER BY day_of_week LIMIT 7
+h) Q: "Day-wise breakdown of message activity"
+A: SELECT 
+    DIVIDE(TO_LONG(DATE_TRUNC(TO_DATE(created_at_timestamp * 1000), 'day')), 1000) AS date,
+    COUNT(*) AS chat_sessions,
+    SUM(total_messages) AS total_messages,
+    AVG(total_messages) AS avg_messages_per_session
+    FROM chathistories 
+    WHERE is_deleted = false 
+    AND created_at_timestamp >= SUBTRACT(
+      DIVIDE(TO_LONG(CURRENT_DATE()), 1000), 
+      MULTIPLY(30, 86400)
+    )
+    GROUP BY DIVIDE(TO_LONG(DATE_TRUNC(TO_DATE(created_at_timestamp * 1000), 'day')), 1000)
+    ORDER BY date
+
+i) Q: "Distribution of leads by ad source"
+A: SELECT CASE WHEN meta_ad_data_synced = true THEN 'Meta/Facebook' WHEN google_ad_data_synced = true THEN 'Google' ELSE 'Other' END as ad_source, COUNT(*) as count FROM contacts WHERE is_deleted = false GROUP BY ad_source ORDER BY count DESC
+
+j) Q: "Number of contacts who has replied to an agent in the last 30 days"
+A: SELECT 
+      'Last 30 Days' AS period,
+      COUNT(*) AS responded_contacts
+    FROM chathistories
+    WHERE is_deleted = false
+      AND first_response_received = true
+      AND created_at_timestamp >= SUBTRACT(
+            DIVIDE(TO_LONG(CURRENT_DATE()), 1000),
+            MULTIPLY(30, 86400)
+          )
+
+    UNION ALL
+
+    SELECT 
+      '30-60 Days' AS period,
+      COUNT(*) AS responded_contacts
+    FROM chathistories
+    WHERE is_deleted = false
+      AND first_response_received = true
+      AND created_at_timestamp < SUBTRACT(
+            DIVIDE(TO_LONG(CURRENT_DATE()), 1000),
+            MULTIPLY(30, 86400)
+          )
+      AND created_at_timestamp >= SUBTRACT(
+            DIVIDE(TO_LONG(CURRENT_DATE()), 1000),
+            MULTIPLY(60, 86400)
+          )
+
+k) Q: "Month-wise breakdown of key metrics over the last 12 months"
+A: SELECT 
+      DATE_TO_STRING(
+        DATE_TRUNC(TO_DATE(created_at_timestamp * 1000), 'month'),
+        '%b %Y',
+        'UTC'
+      ) AS month,
+      COUNT(*) AS total_leads,
+      SUM(CASE WHEN status = 'CONVERTED' THEN 1 ELSE 0 END) AS converted_leads,
+      SUM(CASE WHEN first_response_received = true THEN 1 ELSE 0 END) AS responded_leads,
+      DIVIDE(
+        TO_LONG(DATE_TRUNC(TO_DATE(created_at_timestamp * 1000), 'month')),
+        1000
+      ) AS month_start
+    FROM contacts 
+    WHERE is_deleted = false 
+      AND created_at_timestamp >= SUBTRACT(
+            DIVIDE(TO_LONG(CURRENT_DATE()), 1000), 
+            MULTIPLY(365, 86400)
+          )
+    GROUP BY 
+      DATE_TO_STRING(DATE_TRUNC(TO_DATE(created_at_timestamp * 1000), 'month'), '%b %Y', 'UTC'),
+      DIVIDE(TO_LONG(DATE_TRUNC(TO_DATE(created_at_timestamp * 1000), 'month')), 1000)
+    ORDER BY month_start DESC
+
+l) Q: "Daily breakdown of leads through the conversion funnel"
+A: SELECT 
+      DIVIDE(TO_LONG(DATE_TRUNC(TO_DATE(created_at_timestamp * 1000), 'day')), 1000) AS date,
+      COUNT(*) AS total_leads,
+      SUM(CASE WHEN contact_stage = 'LEAD' THEN 1 ELSE 0 END) AS leads,
+      SUM(CASE WHEN contact_stage = 'QUALIFIED' THEN 1 ELSE 0 END) AS qualified,
+      SUM(CASE WHEN contact_stage = 'PROPOSAL' THEN 1 ELSE 0 END) AS proposals,
+      SUM(CASE WHEN contact_stage = 'CONVERTED' THEN 1 ELSE 0 END) AS converted,
+      DIVIDE(SUM(CASE WHEN contact_stage = 'CONVERTED' THEN 1 ELSE 0 END), COUNT(*)) AS conversion_rate
+    FROM contacts 
+    WHERE is_deleted = false 
+    AND created_at_timestamp >= SUBTRACT(
+      DIVIDE(TO_LONG(CURRENT_DATE()), 1000), 
+      MULTIPLY(30, 86400)
+    )
+    GROUP BY DIVIDE(TO_LONG(DATE_TRUNC(TO_DATE(created_at_timestamp * 1000), 'day')), 1000)
+    ORDER BY date
+
+m) Q: "Distribution of contacts by timezone"
+A: SELECT timezone, COUNT(*) as count FROM contacts WHERE is_deleted = false GROUP BY timezone ORDER BY count DESC LIMIT 10
+
+n) Q: "Distribution of meetings by status"
+A: SELECT type as meeting_status, COUNT(*) as count FROM events WHERE is_deleted = false
+    AND type IN ('MEETING_SCHEDULED', 'MEETING_ATTENDED', 'MEETING_CANCELLED', 'MEETING_RESCHEDULED')
+    GROUP BY type ORDER BY count DESC
+
+o) Q: "Distribution of contacts by tags"
+A: SELECT label, COUNT(*) AS count FROM contacttags WHERE label IS NOT NULL AND label != '' GROUP BY label ORDER BY count DESC, label ASC LIMIT 20
+
+p) Q: "Distribution of contacts by lifecycle stage"
+A: SELECT
+      lifecycle_stage,
+      COUNT(*) AS total_contacts
+      FROM corecontacts
+      WHERE lifecycle_stage IS NOT NULL
+      and is_deleted = false
+      and lifecycle_stage != 'NONE' 
+      GROUP BY lifecycle_stage
+      ORDER BY total_contacts DESC
+
+q) Q: "Week-wise breakdown of new leads over the last 8 weeks"
+A: SELECT 
+      DATE_TO_STRING(
+        DATE_TRUNC(TO_DATE(created_at_timestamp * 1000), 'week'),
+        '%b %d, %Y',
+        'UTC'
+      ) AS week_label,
+      DIVIDE(TO_LONG(DATE_TRUNC(TO_DATE(created_at_timestamp * 1000), 'week')), 1000) AS week_start,
+      COUNT(*) AS total_leads,
+      SUM(CASE WHEN status = 'IN_PROGRESS' THEN 1 ELSE 0 END) AS in_progress_leads,
+      SUM(CASE WHEN status = 'CONVERTED' THEN 1 ELSE 0 END) AS converted_leads,
+      SUM(CASE WHEN status = 'NOT_QUALIFIED' THEN 1 ELSE 0 END) AS not_qualified_leads
+    FROM contacts 
+    WHERE is_deleted = false 
+      AND created_at_timestamp >= SUBTRACT(
+            DIVIDE(TO_LONG(CURRENT_DATE()), 1000), 
+            MULTIPLY(56, 86400)
+          )
+    GROUP BY 
+      DATE_TO_STRING(DATE_TRUNC(TO_DATE(created_at_timestamp * 1000), 'week'), '%b %d, %Y', 'UTC'),
+      DIVIDE(TO_LONG(DATE_TRUNC(TO_DATE(created_at_timestamp * 1000), 'week')), 1000)
+    ORDER BY week_start
+
+r) Q: "Contacts grouped by message engagement"
+A: SELECT CASE WHEN total_messages = 0 THEN 'No Messages' WHEN total_messages <= 5 THEN 'Low (1-5)' WHEN total_messages <= 20 THEN 'Medium (6-20)' WHEN total_messages <= 50 THEN 'High (21-50)' ELSE 'Very High (50+)' END as engagement_level, COUNT(*) as count FROM contacts WHERE is_deleted = false GROUP BY engagement_level ORDER BY MIN(total_messages)
+
+s) Q: "Comparison of activity between weekends and weekdays"
+A: SELECT 
+    CASE 
+      WHEN DAY_OF_WEEK(TO_DATE(created_at_timestamp * 1000)) IN (1, 7) THEN 'Weekend'
+      ELSE 'Weekday'
+    END as day_type,
+    COUNT(*) as total_leads,
+    SUM(CASE WHEN status = 'CONVERTED' THEN 1 ELSE 0 END) as converted_leads,
+    AVG(total_messages) as avg_messages
+  FROM contacts 
+  WHERE is_deleted = false 
+    AND created_at_timestamp >= SUBTRACT(DIVIDE(TO_LONG(CURRENT_DATE()), 1000), MULTIPLY(30, 86400))
+  GROUP BY CASE 
+    WHEN DAY_OF_WEEK(TO_DATE(created_at_timestamp * 1000)) IN (1, 7) THEN 'Weekend'
+    ELSE 'Weekday'
+  END
+
+t) Q: "Number of leads that have been qualified"
+A: SELECT COUNT(*) AS value, 'Qualified Leads' AS label
+      FROM contacts
+      WHERE is_deleted = false
+      AND status = 'QUALIFIED'
+
+u) Q: "Contacts who have exchanged messages"
+A: SELECT COUNT(*) as contacts_with_messages FROM contacts WHERE is_deleted = false AND total_messages > 0
+
+v) Q: "Contacts with recent message activity"
+A: SELECT COUNT(*) as active_contacts FROM contacts WHERE is_deleted = false AND last_message_timestamp > 0
+
+w) Q: "Count of all messages (Agent + User)"
+A: SELECT 
+      'Last 30 Days' AS period,
+      COUNT(*) AS total_messages
+    FROM chathistorydetailedmessages
+    WHERE created_at_timestamp >= SUBTRACT(
+            DIVIDE(TO_LONG(CURRENT_DATE()), 1000),
+            MULTIPLY(30, 86400)
+          )
+
+    UNION ALL
+
+    SELECT 
+      '30-60 Days' AS period,
+      COUNT(*) AS total_messages
+    FROM chathistorydetailedmessages
+    WHERE created_at_timestamp < SUBTRACT(
+            DIVIDE(TO_LONG(CURRENT_DATE()), 1000),
+            MULTIPLY(30, 86400)
+          )
+      AND created_at_timestamp >= SUBTRACT(
+            DIVIDE(TO_LONG(CURRENT_DATE()), 1000),
+            MULTIPLY(60, 86400)
+          )
+
+x) Q: "Distribution of leads by their source"
+A: SELECT source, COUNT(*) as count FROM contacts WHERE is_deleted = false GROUP BY source ORDER BY count DESC
+
+y) Q: "Distribution of messages by communication channel"
+A: SELECT channel, COUNT(*) as chat_sessions, SUM(total_messages) as total_messages FROM chathistories WHERE is_deleted = false GROUP BY channel ORDER BY total_messages DESC
+
+z) Q: "Messages grouped by communication channels"
+A: SELECT channel, COUNT(*) as chat_sessions, SUM(total_messages) as total_messages FROM chathistories WHERE is_deleted = false GROUP BY channel ORDER BY total_messages DESC
+
+aa) Q: "Conversion rates by lead source"
+A: SELECT source, COUNT(*) as total_leads, SUM(CASE WHEN status = 'CONVERTED' THEN 1 ELSE 0 END) as converted_leads FROM contacts WHERE is_deleted = false GROUP BY source ORDER BY total_leads DESC
+
+bb) Q: "Current week vs previous week key metrics comparison"
+A: SELECT 
+      'This Week' AS period,
+      COUNT(*) AS total_leads,
+      SUM(CASE WHEN status = 'IN_PROGRESS' THEN 1 ELSE 0 END) AS in_progress_leads,
+      SUM(CASE WHEN status = 'CONVERTED' THEN 1 ELSE 0 END) AS converted_leads,
+      SUM(CASE WHEN first_response_received = true THEN 1 ELSE 0 END) AS responded_leads
+    FROM contacts
+    WHERE is_deleted = false
+      AND created_at_timestamp >= SUBTRACT(
+            DIVIDE(TO_LONG(CURRENT_DATE()), 1000),
+            MULTIPLY(7, 86400)
+          )
+      AND created_at_timestamp < DIVIDE(TO_LONG(CURRENT_DATE()), 1000)
+
+    UNION ALL
+
+    SELECT 
+      'Last Week' AS period,
+      COUNT(*) AS total_leads,
+      SUM(CASE WHEN status = 'IN_PROGRESS' THEN 1 ELSE 0 END) AS in_progress_leads,
+      SUM(CASE WHEN status = 'CONVERTED' THEN 1 ELSE 0 END) AS converted_leads,
+      SUM(CASE WHEN first_response_received = true THEN 1 ELSE 0 END) AS responded_leads
+    FROM contacts
+    WHERE is_deleted = false
+      AND created_at_timestamp >= SUBTRACT(
+            DIVIDE(TO_LONG(CURRENT_DATE()), 1000),
+            MULTIPLY(14, 86400)
+          )
+      AND created_at_timestamp < SUBTRACT(
+            DIVIDE(TO_LONG(CURRENT_DATE()), 1000),
+            MULTIPLY(7, 86400)
+          )
+
+cc) Q: "Distribution of leads by their current status"
+A: SELECT status, COUNT(*) as count FROM contacts WHERE is_deleted = false GROUP BY status ORDER BY count DESC
+
+dd) Q: "Distribution of leads by their contact stage"
+A: SELECT contact_stage, COUNT(*) as count FROM contacts WHERE is_deleted = false GROUP BY contact_stage ORDER BY count DESC
+
+ee) Q: "Day-wise breakdown of new leads over the last 30 days"
+A: SELECT 
+      DIVIDE(TO_LONG(DATE_TRUNC(TO_DATE(created_at_timestamp * 1000), 'day')), 1000) AS date,
+      COUNT(*) AS new_leads
+    FROM contacts 
+    WHERE is_deleted = false 
+      AND created_at_timestamp >= SUBTRACT(
+            DIVIDE(TO_LONG(CURRENT_DATE()), 1000), 
+            MULTIPLY(30, 86400)
+          )
+    GROUP BY DIVIDE(TO_LONG(DATE_TRUNC(TO_DATE(created_at_timestamp * 1000), 'day')), 1000)
+    ORDER BY date
+
+ff) Q: "Number of contacts who has replied to an agent in the last 30 days"
+A: SELECT 
+      'Last 30 Days' AS period,
+      COUNT(*) AS responded_contacts
+    FROM chathistories
+    WHERE is_deleted = false
+      AND first_response_received = true
+      AND created_at_timestamp >= SUBTRACT(
+            DIVIDE(TO_LONG(CURRENT_DATE()), 1000),
+            MULTIPLY(30, 86400)
+          )
+
+    UNION ALL
+
+    SELECT 
+      '30-60 Days' AS period,
+      COUNT(*) AS responded_contacts
+    FROM chathistories
+    WHERE is_deleted = false
+      AND first_response_received = true
+      AND created_at_timestamp < SUBTRACT(
+            DIVIDE(TO_LONG(CURRENT_DATE()), 1000),
+            MULTIPLY(30, 86400)
+          )
+      AND created_at_timestamp >= SUBTRACT(
+            DIVIDE(TO_LONG(CURRENT_DATE()), 1000),
+            MULTIPLY(60, 86400)
+          )
+
+gg) Q: "Average number of messages per conversation (Last 30 Days)"
+A: SELECT 
+      ROUND(AVG(total_messages)) AS value,
+      'Avg Total Message' AS label
+    FROM contacts
+    WHERE is_deleted = false
+      AND created_at_timestamp >= SUBTRACT(
+            DIVIDE(TO_LONG(CURRENT_DATE()), 1000),
+            MULTIPLY(30, 86400)
+          )
+    GROUP BY NULL
+
+hh) Q: "Hour-by-hour breakdown of activity for today"
+A: SELECT 
+    HOUR(TO_DATE(created_at_timestamp * 1000)) as hour,
+    COUNT(*) as new_contacts,
+    SUM(CASE WHEN total_messages > 0 THEN 1 ELSE 0 END) as active_contacts
+  FROM contacts 
+  WHERE is_deleted = false 
+    AND created_at_timestamp >= SUBTRACT(DIVIDE(TO_LONG(CURRENT_DATE()), 1000), MULTIPLY(1, 86400))
+  GROUP BY HOUR(TO_DATE(created_at_timestamp * 1000))
+  ORDER BY hour
+
+ii) Q: "Events by contact with contact details"
+A: SELECT 
+    c.name as contact_name,
+    c.email,
+    e.event_type,
+    COUNT(*) as event_count
+  FROM events e
+  JOIN contacts c ON e.contact_id = c._id
+  WHERE e.is_deleted = false
+  GROUP BY c.name, c.email, e.event_type
+  ORDER BY event_count DESC
+
+jj) Q: "User activity with user details"
+A: SELECT 
+    u.username,
+    u.first_name,
+    u.last_name,
+    e.event_type,
+    COUNT(*) as activity_count
+  FROM events e
+  JOIN users u ON e.user_id = u._id
+  WHERE e.is_deleted = false
+  GROUP BY u.username, u.first_name, u.last_name, e.event_type
+  ORDER BY activity_count DESC
+
+kk) Q: "Contacts with their organization details"
+A: SELECT 
+    c.name as contact_name,
+    c.email,
+    o.name as organization_name,
+    o.industry,
+    o.size
+  FROM contacts c
+  JOIN organizations o ON c.company = o.name
+  WHERE c.is_deleted = false
+  ORDER BY o.name, c.name
+
+ll) Q: "Events grouped by date and type"
+A: SELECT 
+    DATE_TRUNC(TO_DATE(created_at * 1000), 'day') AS event_date,
+    event_type,
+    COUNT(*) AS event_count
+  FROM events
+  WHERE is_deleted = false
+  GROUP BY DATE_TRUNC(TO_DATE(created_at * 1000), 'day'), event_type
+  ORDER BY event_date, event_count DESC
+
+mm) Q: "Monthly event activity by type"
+A: SELECT 
+    DATE_TRUNC(TO_DATE(created_at * 1000), 'month') AS event_month,
+    event_type,
+    COUNT(*) AS event_count
+  FROM events
+  WHERE is_deleted = false
+  GROUP BY DATE_TRUNC(TO_DATE(created_at * 1000), 'month'), event_type
+  ORDER BY event_month, event_count DESC
+
+nn) Q: "Weekly contact creation trends"
+A: SELECT 
+    DATE_TRUNC(TO_DATE(created_at_timestamp * 1000), 'week') AS week_start,
+    COUNT(*) AS new_contacts
+  FROM contacts
+  WHERE is_deleted = false
+  GROUP BY DATE_TRUNC(TO_DATE(created_at_timestamp * 1000), 'week')
+  ORDER BY week_start DESC
+
+oo) Q: "Hourly event activity breakdown"
+A: SELECT 
+    HOUR(TO_DATE(timestamp * 1000)) as hour,
+    COUNT(*) as event_count
+  FROM events
+  WHERE is_deleted = false
+  GROUP BY HOUR(TO_DATE(timestamp * 1000))
+  ORDER BY hour
+
+pp) Q: "Event activity by time ranges"
+A: SELECT 
+    CASE
+      WHEN HOUR(TO_DATE(timestamp * 1000)) >= 0 AND HOUR(TO_DATE(timestamp * 1000)) <= 3 THEN '00:00-03:00'
+      WHEN HOUR(TO_DATE(timestamp * 1000)) >= 4 AND HOUR(TO_DATE(timestamp * 1000)) <= 6 THEN '04:00-06:00'
+      WHEN HOUR(TO_DATE(timestamp * 1000)) >= 7 AND HOUR(TO_DATE(timestamp * 1000)) <= 9 THEN '07:00-09:00'
+      WHEN HOUR(TO_DATE(timestamp * 1000)) >= 10 AND HOUR(TO_DATE(timestamp * 1000)) <= 12 THEN '10:00-12:00'
+      WHEN HOUR(TO_DATE(timestamp * 1000)) >= 13 AND HOUR(TO_DATE(timestamp * 1000)) <= 15 THEN '13:00-15:00'
+      WHEN HOUR(TO_DATE(timestamp * 1000)) >= 16 AND HOUR(TO_DATE(timestamp * 1000)) <= 18 THEN '16:00-18:00'
+      WHEN HOUR(TO_DATE(timestamp * 1000)) >= 19 AND HOUR(TO_DATE(timestamp * 1000)) <= 21 THEN '19:00-21:00'
+      WHEN HOUR(TO_DATE(timestamp * 1000)) >= 22 AND HOUR(TO_DATE(timestamp * 1000)) <= 23 THEN '22:00-23:00'
+    END as time_range,
+    COUNT(*) as event_count
+  FROM events
+  WHERE is_deleted = false
+  GROUP BY time_range
+  ORDER BY time_range
+
+qq) Q: "Hour-by-hour breakdown of activity for today"
+A: SELECT 
+    HOUR(TO_DATE(created_at_timestamp * 1000)) as hour,
+    COUNT(*) as new_contacts,
+    SUM(CASE WHEN total_messages > 0 THEN 1 ELSE 0 END) as active_contacts
+  FROM contacts 
+  WHERE is_deleted = false 
+    AND created_at_timestamp >= SUBTRACT(DIVIDE(TO_LONG(CURRENT_DATE()), 1000), MULTIPLY(1, 86400))
+  GROUP BY HOUR(TO_DATE(created_at_timestamp * 1000))
+  ORDER BY hour
 
 # SCHEMA:
 {schema}
+
+# TABLE RELATIONSHIPS:
+**CRITICAL: Understanding Table Relationships for JOINs**
+
+1. **events** ↔ **contacts** (Primary Relationship)
+   - `events.contact_id` → `contacts._id` (Foreign Key)
+   - Use: JOIN events ON events.contact_id = contacts._id
+   - Purpose: Link events/activities to specific contacts
+
+2. **events** ↔ **users** (User Activity Tracking)
+   - `events.user_id` → `users._id` (Foreign Key)
+   - Use: JOIN events ON events.user_id = users._id
+   - Purpose: Track which user performed which events
+
+3. **contacts** ↔ **organizations** (Company Association)
+   - `contacts.company` → `organizations.name` (Logical relationship)
+   - Use: JOIN contacts ON contacts.company = organizations.name
+   - Purpose: Link contacts to their organizations
+
+4. **Additional Tables** (Referenced in examples but not in core schema):
+   - `chathistories` - Chat session data (contact_id → contacts._id)
+   - `contacttags` - Contact tagging (contact_id → contacts._id)
+   - `corecontacts` - Extended contact data (contact_id → contacts._id)
+   - `chathistorydetailedmessages` - Individual messages (chat_id → chathistories._id)
+
+**JOIN PATTERNS:**
+- For contact-related events: JOIN events ON events.contact_id = contacts._id
+- For user activity: JOIN events ON events.user_id = users._id
+- For organization data: JOIN contacts ON contacts.company = organizations.name
+- For chat data: JOIN chathistories ON chathistories.contact_id = contacts._id
 
 # USER QUESTION:
 {question}
@@ -105,12 +605,7 @@ A: SELECT DAY_OF_WEEK(TO_DATE(created_at_timestamp * 1000)) AS day_of_week, COUN
 # OUTPUT: The NoQL query ONLY, no explanation.
 """
 
-# In-memory schema cache to avoid repeated API calls
-_SCHEMA_CACHE = {
-    "schema": None,
-    "timestamp": None,
-    "ttl_seconds": 3600  # Cache for 1 hour
-}
+# Schema cache removed - using hardcoded schema
 
 app = Flask(__name__)
 # Enable CORS for your frontend on :3001 by default; override via CORS_ORIGINS env (comma-separated)
@@ -149,9 +644,9 @@ def register_database(name: str, uri: str = None):
     return databases[name]
 
 # ===== JSON Serialization Helpers =====
-# Custom JSON encoder for database objects (handles Decimal, etc.)
-class DatabaseJSONEncoder(json.JSONEncoder):
-    def default(self, obj):
+def safe_json_dumps(obj, **kwargs):
+    """JSON dumps with default handler for non-serializable objects (Decimal, datetime, etc.)"""
+    def default_handler(obj):
         if isinstance(obj, Decimal):
             return float(obj)
         if isinstance(obj, (date, datetime)):
@@ -159,136 +654,144 @@ class DatabaseJSONEncoder(json.JSONEncoder):
         if hasattr(obj, '__dict__'):
             return obj.__dict__
         return str(obj)
-
-# Helper function for safe JSON serialization
-def safe_json_dumps(obj, **kwargs):
-    """JSON dumps with custom encoder for database objects"""
-    return json.dumps(obj, cls=DatabaseJSONEncoder, **kwargs)
+    return json.dumps(obj, default=default_handler, **kwargs)
 
 
 # ===== NoQL API Helper Functions =====
-def simplify_schema_for_noql(full_schema: dict) -> dict:
-    """Extract only query-relevant information from the full schema."""
-    simplified = {"collections": []}
-    
-    for obj in full_schema.get("data", []):
-        collection = {
-            "name": obj.get("object_type"),
-            "description": obj.get("description"),
-            "fields": []
-        }
-        
-        # Extract only essential field info
-        for field in obj.get("base_fields", []) + obj.get("custom_fields", []):
-            field_name = field.get("field_key")
-            field_type = field.get("field_type")
-            
-            field_info = {
-                "name": field_name,
-                "type": field_type
+# Schema simplification function removed - using hardcoded schema
+
+
+# Cached schema as JSON string (computed once at module load)
+_SCHEMA_DICT = {
+        "collections": [
+            {
+                "name": "contacts",
+                "description": "Customer/Lead contact information",
+                "fields": [
+                    {"name": "_id", "type": "STRING", "unique": True},
+                    {"name": "first_name", "type": "TEXT"},
+                    {"name": "last_name", "type": "TEXT"},
+                    {"name": "full_name", "type": "TEXT"},
+                    {"name": "email", "type": "EMAIL"},
+                    {"name": "phone", "type": "PHONE"},
+                    {"name": "status", "type": "SELECT", "options": ["NEW", "INITIATED", "IN_PROGRESS", "NOT_INTERESTED", "NOT_QUALIFIED", "CONVERTED", "IN_ACTIVE"]},
+                    {"name": "contact_stage", "type": "TEXT"},
+                    {"name": "source", "type": "SELECT", "options": ["GOOGLE_AD", "META_AD", "META_LEADGEN", "META_CTWA", "TIKTOK_AD", "LINKEDIN_AD", "OUTBOUND_CALL", "INBOUND_CALL", "INBOUND_FACEBOOK", "INBOUND_INSTAGRAM", "INBOUND_WHATSAPP", "LANDING_PAGE", "WEBSITE_FORM", "IMPORT", "MANUAL", "OTHER"]},
+                    {"name": "timezone", "type": "TEXT"},
+                    {"name": "notes", "type": "TEXTAREA"},
+                    {"name": "total_messages", "type": "NUMBER"},
+                    {"name": "total_user_messages", "type": "NUMBER"},
+                    {"name": "total_agent_messages", "type": "NUMBER"},
+                    {"name": "last_message_timestamp", "type": "DATETIME"},
+                    {"name": "first_agent_message_timestamp", "type": "DATETIME"},
+                    {"name": "first_user_message_timestamp", "type": "DATETIME"},
+                    {"name": "first_response_received", "type": "BOOLEAN"},
+                    {"name": "is_archived", "type": "BOOLEAN"},
+                    {"name": "created_at_timestamp", "type": "DATETIME", "storage": "unix_epoch_seconds", "note": "⚠️ Unix epoch SECONDS! Must convert: TO_DATE(field * 1000) before using date functions", "example": "DAY_OF_WEEK(TO_DATE(created_at_timestamp * 1000))"},
+                    {"name": "updated_at_timestamp", "type": "DATETIME", "storage": "unix_epoch_seconds", "note": "⚠️ Unix epoch SECONDS! Must convert: TO_DATE(field * 1000) before using date functions", "example": "DAY_OF_WEEK(TO_DATE(updated_at_timestamp * 1000))"}
+                ]
+            },
+            {
+                "name": "corecontacts",
+                "description": "Unified contact information across all agents and channels",
+                "fields": [
+                    {"name": "_id", "type": "STRING", "unique": True},
+                    {"name": "first_name", "type": "TEXT"},
+                    {"name": "last_name", "type": "TEXT"},
+                    {"name": "full_name", "type": "TEXT"},
+                    {"name": "email", "type": "EMAIL"},
+                    {"name": "phone", "type": "PHONE"},
+                    {"name": "lifecycle_stage", "type": "TEXT"},
+                    {"name": "status", "type": "TEXT"},
+                    {"name": "sub_status", "type": "TEXT"},
+                    {"name": "timezone", "type": "TEXT"},
+                    {"name": "notes", "type": "TEXTAREA"},
+                    {"name": "is_spam", "type": "BOOLEAN"},
+                    {"name": "is_unsubscribed", "type": "BOOLEAN"},
+                    {"name": "is_consent_received", "type": "BOOLEAN"},
+                    {"name": "is_archived", "type": "BOOLEAN"},
+                    {"name": "is_active", "type": "BOOLEAN"},
+                    {"name": "is_deleted", "type": "BOOLEAN"},
+                    {"name": "created_at_timestamp", "type": "DATETIME", "storage": "unix_epoch_seconds", "note": "⚠️ Unix epoch SECONDS! Must convert: TO_DATE(field * 1000) before using date functions", "example": "DAY_OF_WEEK(TO_DATE(created_at_timestamp * 1000))"},
+                    {"name": "updated_at_timestamp", "type": "DATETIME", "storage": "unix_epoch_seconds", "note": "⚠️ Unix epoch SECONDS! Must convert: TO_DATE(field * 1000) before using date functions", "example": "DAY_OF_WEEK(TO_DATE(updated_at_timestamp * 1000))"}
+                ]
+            },
+            {
+                "name": "contacttags",
+                "description": "Customer/Lead contact tag information",
+                "fields": [
+                    {"name": "_id", "type": "STRING", "unique": True},
+                    {"name": "label", "type": "TEXT", "required": True},
+                    {"name": "color", "type": "TEXT", "required": True},
+                    {"name": "contact_id", "type": "REFERENCE"},
+                    {"name": "created_at_timestamp", "type": "DATETIME", "storage": "unix_epoch_seconds", "note": "⚠️ Unix epoch SECONDS! Must convert: TO_DATE(field * 1000) before using date functions", "example": "DAY_OF_WEEK(TO_DATE(created_at_timestamp * 1000))"},
+                    {"name": "updated_at_timestamp", "type": "DATETIME", "storage": "unix_epoch_seconds", "note": "⚠️ Unix epoch SECONDS! Must convert: TO_DATE(field * 1000) before using date functions", "example": "DAY_OF_WEEK(TO_DATE(updated_at_timestamp * 1000))"}
+                ]
+            },
+            {
+                "name": "events",
+                "description": "Tracks lifecycle, marketing, and communication events across channels",
+                "fields": [
+                    {"name": "_id", "type": "STRING", "unique": True},
+                    {"name": "event_id", "type": "TEXT", "required": True, "unique": True},
+                    {"name": "org_id", "type": "REFERENCE", "required": True},
+                    {"name": "anonymous_id", "type": "TEXT"},
+                    {"name": "email", "type": "EMAIL"},
+                    {"name": "phone", "type": "PHONE"},
+                    {"name": "core_contact_id", "type": "REFERENCE"},
+                    {"name": "agent_contact_id", "type": "REFERENCE"},
+                    {"name": "category", "type": "SELECT", "options": ["ENGAGEMENT", "LIFECYCLE", "SYSTEM", "COMMUNICATION", "CUSTOM"]},
+                    {"name": "type", "type": "SELECT", "options": ["MESSAGE_SENT", "MESSAGE_RECEIVED", "STATUS_CHANGE", "STAGE_CHANGE", "LIFECYCLE_CHANGE", "CUSTOM"]},
+                    {"name": "change_value_for_type", "type": "TEXT"},
+                    {"name": "timestamp", "type": "NUMBER", "required": True, "storage": "unix_epoch_seconds", "note": "⚠️ Unix epoch SECONDS! Must convert: TO_DATE(field * 1000) before using date functions", "example": "DAY_OF_WEEK(TO_DATE(timestamp * 1000))"},
+                    {"name": "channel", "type": "SELECT", "options": ["WEB", "SMS", "WHATSAPP", "EMAIL", "QR", "VOICE", "SOCIAL"]},
+                    {"name": "sub_channel", "type": "TEXT"},
+                    {"name": "message_content", "type": "TEXTAREA"},
+                    {"name": "message_sentiment", "type": "SELECT", "options": ["POSITIVE", "NEGATIVE", "NEUTRAL"]},
+                    {"name": "message_type", "type": "SELECT", "options": ["TEXT", "IMAGE", "VIDEO", "AUDIO", "DOCUMENT"]},
+                    {"name": "created_at", "type": "DATETIME", "required": True},
+                    {"name": "updated_at", "type": "DATETIME", "required": True},
+                    {"name": "is_deleted", "type": "BOOLEAN"}
+                ]
+            },
+            {
+                "name": "chathistories",
+                "description": "Stores conversation history, feedback metrics, and message analytics for each contact across channels",
+                "fields": [
+                    {"name": "_id", "type": "STRING", "unique": True},
+                    {"name": "org_id", "type": "REFERENCE"},
+                    {"name": "org_agent_id", "type": "REFERENCE"},
+                    {"name": "contact_id", "type": "REFERENCE"},
+                    {"name": "provider", "type": "TEXT"},
+                    {"name": "channel", "type": "SELECT", "options": ["WEB", "WHATSAPP", "INSTAGRAM", "FACEBOOK_MESSENGER", "EMAIL", "VOICE", "OTHER"]},
+                    {"name": "contact_phone_number", "type": "PHONE"},
+                    {"name": "contact_email", "type": "EMAIL"},
+                    {"name": "body", "type": "TEXTAREA"},
+                    {"name": "last_message_timestamp", "type": "DATETIME"},
+                    {"name": "first_agent_message_timestamp", "type": "DATETIME"},
+                    {"name": "first_user_message_timestamp", "type": "DATETIME"},
+                    {"name": "total_guardrail_triggers", "type": "NUMBER"},
+                    {"name": "first_response_received", "type": "BOOLEAN"},
+                    {"name": "total_messages", "type": "NUMBER"},
+                    {"name": "total_user_messages", "type": "NUMBER"},
+                    {"name": "total_agent_messages", "type": "NUMBER"},
+                    {"name": "created_at_timestamp", "type": "DATETIME", "storage": "unix_epoch_seconds", "note": "⚠️ Unix epoch SECONDS! Must convert: TO_DATE(field * 1000) before using date functions", "example": "DAY_OF_WEEK(TO_DATE(created_at_timestamp * 1000))"},
+                    {"name": "updated_at_timestamp", "type": "DATETIME", "storage": "unix_epoch_seconds", "note": "⚠️ Unix epoch SECONDS! Must convert: TO_DATE(field * 1000) before using date functions", "example": "DAY_OF_WEEK(TO_DATE(updated_at_timestamp * 1000))"},
+                    {"name": "is_deleted", "type": "BOOLEAN"}
+                ]
             }
-            
-            # Detect Unix timestamp fields - be aggressive with detection!
-            # Common patterns: created_at, updated_at, timestamp, *_timestamp, *_at
-            is_timestamp_field = (
-                "timestamp" in field_name.lower() or
-                field_name.lower().endswith("_at") or
-                field_name.lower() in ["created_at", "updated_at", "deleted_at", "timestamp"] or
-                (field_type == "DATETIME" and isinstance(field.get("default_value"), (int, float)))
-            )
-            
-            if is_timestamp_field:
-                field_info["storage"] = "unix_epoch_seconds"
-                field_info["note"] = "⚠️ Unix epoch SECONDS! Must convert: TO_DATE(field * 1000) before using date functions"
-                field_info["example"] = f"DAY_OF_WEEK(TO_DATE({field_name} * 1000))"
-            
-            # Include only query-relevant metadata
-            if field.get("is_indexed"):
-                field_info["indexed"] = True
-            if field.get("is_unique"):
-                field_info["unique"] = True
-            if field.get("is_required"):
-                field_info["required"] = True
-            if field.get("default_value") is not None:
-                field_info["default"] = field.get("default_value")
-                
-            collection["fields"].append(field_info)
-        
-        # Include indexes for query optimization hints
-        if obj.get("indexes"):
-            collection["indexes"] = obj["indexes"]
-        
-        # Include relationships for JOIN support
-        if obj.get("relationships"):
-            collection["relationships"] = [
-                {
-                    "name": rel.get("relationship_name"),
-                    "target": rel.get("target_object_type"),
-                    "type": rel.get("relationship_type"),
-                    "foreign_key": rel.get("foreign_key"),
-                    "target_field": rel.get("target_field")
-                }
-                for rel in obj["relationships"]
-            ]
-        
-        simplified["collections"].append(collection)
-    
-    return simplified
+        ]
+    }
 
+# Convert to JSON string once at module load (used directly throughout the code)
+_SCHEMA_JSON = json.dumps(_SCHEMA_DICT, indent=2)
 
-def fetch_schema_from_api(use_cache: bool = True) -> dict:
-    """Fetch schema from API and return simplified version (with caching).
-    
-    Args:
-        use_cache: If True, use cached schema if available and not expired
-        
-    Returns:
-        Simplified schema dictionary
-    """
-    import time
-    
-    # Check if we have a valid cached schema
-    if use_cache and _SCHEMA_CACHE["schema"] is not None and _SCHEMA_CACHE["timestamp"] is not None:
-        age = time.time() - _SCHEMA_CACHE["timestamp"]
-        if age < _SCHEMA_CACHE["ttl_seconds"]:
-            print(f"📦 Using cached schema (age: {age:.1f}s)")
-            return _SCHEMA_CACHE["schema"]
-        else:
-            print(f"⏰ Schema cache expired (age: {age:.1f}s, TTL: {_SCHEMA_CACHE['ttl_seconds']}s)")
-    
-    # Fetch fresh schema from API
-    url = f"{API_BASE_URL}/schemas/schemaForAllowedCollections"
-    
-    try:
-        print(f"🌐 Fetching schema from API...")
-        response = requests.get(url, headers=API_HEADERS, timeout=10)
-        response.raise_for_status()
-        
-        full_data = response.json()
-        simplified = simplify_schema_for_noql(full_data)
-        
-        # DEBUG: Print schema for events collection to verify Unix timestamp detection
-        for coll in simplified.get("collections", []):
-            if coll.get("name") == "events":
-                print(f"🔍 DEBUG: Schema for 'events' collection:")
-                for field in coll.get("fields", [])[:10]:  # Show first 10 fields
-                    print(f"   - {field.get('name')}: {field.get('type')} {field.get('storage', '')} {field.get('note', '')[:50] if field.get('note') else ''}")
-                break
-        
-        # Update cache
-        _SCHEMA_CACHE["schema"] = simplified
-        _SCHEMA_CACHE["timestamp"] = time.time()
-        print(f"✅ Schema cached (TTL: {_SCHEMA_CACHE['ttl_seconds']}s)")
-        
-        return simplified
-    except requests.exceptions.RequestException as e:
-        print(f"❌ Error fetching schema from API: {e}")
-        # If we have an expired cache, return it as fallback
-        if _SCHEMA_CACHE["schema"] is not None:
-            print(f"⚠️ Using stale cached schema as fallback")
-            return _SCHEMA_CACHE["schema"]
-        raise
+def get_hardcoded_schema() -> dict:
+    """Return hardcoded schema for the application."""
+    return _SCHEMA_DICT
 
+# get_schema() removed - use _SCHEMA_JSON directly for JSON string format
+# or get_hardcoded_schema() for dict format
 
 def execute_noql_query(sql_query: str) -> dict:
     """Execute NoQL query via API and return results."""
@@ -378,7 +881,7 @@ def _ensure_sqlite():
             print(f"Migration warning (non-critical): {migration_error}")
         
         conn.commit()
-        print("✅ SQLite database schema updated with database_name columns")
+        print("SQLite database schema updated with database_name columns")
     finally:
         try:
             conn.close()
@@ -576,9 +1079,9 @@ def ensure_limit(query: str, default_limit: int = 50) -> str:
     except Exception:
         return query
 
-# Best-effort sanitizer for quick exploratory SQL to fit AirportDB schema
-# Generic cleaner for any SQL emitted by the LLM
-def _strip_sql_fences(q) -> str:
+# Best-effort sanitizer for quick exploratory NoQL queries
+# Generic cleaner for any NoQL query emitted by the LLM
+def _strip_query_fences(q) -> str:
     try:
         # Ensure input is a string
         if not isinstance(q, str):
@@ -605,19 +1108,25 @@ def _strip_sql_fences(q) -> str:
         except Exception:
             return ""
 
+# Normalize query: strip fences and enforce limit
+def normalize_query(query: str, limit: int = 50) -> str:
+    """Normalize a NoQL query by stripping markdown fences and ensuring LIMIT clause."""
+    query = _strip_query_fences(query)
+    query = ensure_limit(query, limit)
+    return query
+
 # ChatGPT-style markdown generation prompt with selective chart embedding (grounded)
 chat_markdown_prompt = ChatPromptTemplate.from_template("""
-You're having a thoughtful, detailed conversation with someone who's genuinely curious about data. Give them a comprehensive, informative explanation - like you're a knowledgeable colleague sharing insights over coffee.
+You are having a natural conversation about CRM data and insights. Write as if you're talking to a colleague - friendly, informative, and conversational, but still professional and business-focused.
 
-Their question: {question}
-Database: {database_name}
+User asked: {question}
 
 🎯 **CRITICAL: ANSWER EXACTLY WHAT WAS ASKED**
-- If they ask about "the world" → show GLOBAL data, not specific countries
-- If they ask about "most populous place" → show the actual most populous places globally
-- If they ask about "European countries" → show European data only
-- If they ask about "US cities" → show US data only
-- DO NOT assume geographic scope - stick to what they actually requested
+- Be conversational, not formal or robotic
+- Use natural language and a friendly tone
+- Focus on actionable business insights
+- Don't mention database names or technical details - just discuss the findings naturally
+- Write like you're explaining to a friend who needs the insights
 
 ACTUAL DATABASE SCHEMA:
 {schema}
@@ -625,31 +1134,38 @@ ACTUAL DATABASE SCHEMA:
 SAMPLE DATA (first few rows per table):
 {samples}
 
-Recent conversation (most recent last). Use this context to avoid repeating points and to maintain continuity. Do NOT restate earlier content verbatim:
+Recent conversation (most recent last). Use this context to maintain continuity and build on previous points naturally. Do NOT restate earlier content verbatim:
 {history}
 
 Facts (ground truth; ONLY use these for numeric claims):
 {facts}
 
-AllowedEntities (you may ONLY name these cities/airlines/aircraft/types; otherwise generalize):
+AllowedEntities (you may ONLY reference these specific entities by name; otherwise use generic terms):
 {allowed_entities}
 
-Write a substantial, detailed response (4-6 paragraphs minimum). Be informative and thorough, but maintain a natural conversational tone. Focus on providing rich context, background information, and detailed analysis. Don't be overly excited or use excessive exclamation points - just be genuinely knowledgeable and helpful.
-
-Think of it like explaining something complex to an intelligent colleague who wants to understand the full picture. You'd provide context, explain the nuances, discuss implications, and give them a comprehensive understanding.
+Write a conversational response (3-5 paragraphs). Talk naturally about the data:
+- Start by acknowledging what they're asking about and give a quick overview
+- Walk through what the data shows in a conversational way
+- Point out interesting patterns or insights as you would in a conversation
+- Discuss what this might mean for their business or operations
+- Keep it friendly and natural - like explaining to a colleague over coffee, not reading from a formal report
 
 Guidelines:
-- Write multiple detailed paragraphs with substantial context
-- Explain the background and why things are the way they are
-- Provide thorough analysis and implications
-- Be conversational but informative - thoughtful rather than excited
-- Include relevant comparisons and historical context where appropriate
-- **Include charts to visualize data** - Use 1-4 charts based on question complexity
-- Keep the tone measured and informative, not overly enthusiastic
+- Write in a conversational, natural tone - like talking to a colleague
+- Use phrases like "I noticed...", "What's interesting is...", "Here's what I found...", "Looking at the data..."
+- Focus on what the data reveals about leads, contacts, conversions, and engagement
+- Share insights naturally - don't sound like you're reading from a report
+- Use business terminology naturally: "leads", "conversions", "engagement", "channels", "lifecycle stages"
+- **Include charts to visualize data** - **🚨🚨🚨 YOU MUST GENERATE EXACTLY 1 CHART - ONLY 1 CHART, NO MORE 🚨🚨🚨**
+- Never mention database names, technical implementation details, or query structures
+- Avoid formal report language - be conversational and friendly while staying professional
 - **Chart Guidelines:**
-  * Simple COUNT/GROUP BY questions ("contacts per org", "top 10 items", "users by status") → **Generate 1 chart to show the data**
-  * Analysis/exploration questions ("analyze trends", "explore patterns", "understand behavior") → **Generate 2-4 diverse charts showing different perspectives**
-  * **ALWAYS include at least 1 chart when answering data questions** - charts make data easier to understand!
+  * **🚨🚨🚨 CRITICAL RULE: Generate EXACTLY 1 CHART - ALWAYS 1 CHART, NEVER 2 OR MORE 🚨🚨🚨**
+  * **ONLY 1 CHART for ALL questions** - This is not optional, this is mandatory
+  * **DO NOT generate 2, 3, or 4 charts** - Generate ONLY 1 chart
+  * **ONLY exception:** If question EXPLICITLY says "show me multiple charts" or "different perspectives" - then you can generate 2-4 charts
+  * **ALL questions get 1 chart**: "contacts per org", "top 10 items", "hourly activity", "users by status", "event types", "most common X", "hourly breakdown", "messages by channel", etc. - ALL get exactly 1 chart
+  * **ALWAYS include exactly 1 chart when answering data questions** - charts make data easier to understand!
 - Numeric grounding rules:
   - Do NOT invent numbers. If a number is not present in Facts or will be shown in a chart, avoid it or phrase qualitatively ("large share", "increased over time").
   - Prefer citing numbers after a chart block, e.g., "According to the chart below…".
@@ -657,9 +1173,14 @@ Guidelines:
 
 **CHART GENERATION RULES:**
 - **✅ ALWAYS include charts when discussing data** - they help visualize and explain
-- **📊 How many charts to generate:**
-  * Simple specific questions ("contacts per org", "top 10 X", "count by Y") → **1 chart**
-  * Analysis/exploration questions ("analyze", "explore", "understand patterns") → **2-4 charts showing different perspectives**
+- **🚨🚨🚨 MANDATORY: GENERATE EXACTLY 1 CHART - ONE CHART ONLY - DO NOT GENERATE MULTIPLE CHARTS 🚨🚨🚨**
+  * **RULE: ALWAYS generate EXACTLY 1 chart for EVERY question** - This is mandatory, not optional
+  * **DO NOT generate 2 charts, DO NOT generate 3 charts, DO NOT generate 4 charts** - Generate ONLY 1 chart
+  * **The ONLY exception** is if the question EXPLICITLY contains phrases like:
+    - "show me multiple charts", "different perspectives", "multiple views", "various breakdowns"
+    - ONLY then you can generate 2-4 charts
+  * **All questions get 1 chart**: "contacts per org", "top 10 X", "count by Y", "hourly activity", "event types", "most common X", "breakdown by status", "messages by channel", "hourly breakdown", etc. - ALL get exactly 1 chart
+  * **If the question doesn't EXPLICITLY say "multiple charts" or "different perspectives" → You MUST generate exactly 1 chart**
 - **🚨 IF you generate multiple charts: Each chart MUST show DIFFERENT data/perspectives**
 - **NEVER generate 2+ charts that group by the same dimension** - if all charts would be identical, generate only 1
 - **🚨 KEEP QUERIES SIMPLE:** 
@@ -667,6 +1188,43 @@ Guidelines:
     - ✅ GOOD: `SELECT [dimension], COUNT(*) FROM [table] GROUP BY [dimension]`
     - ❌ BAD: `SELECT [dim1], [dim2], COUNT(*) FROM [table] GROUP BY [dim1], [dim2]` (too complex)
     - ❌ BAD: `SELECT YEAR(...), MONTH(...), DAY(...), [field] FROM [table] GROUP BY year, month, day, [field]` (way too granular)
+  
+  * **🕐 HOURLY DATA AGGREGATION:**
+    - When asked about hourly patterns, data by hour, or time of day analysis:
+    - ✅ ALWAYS aggregate hours into 3-hour or 4-hour ranges for better visualization
+    - ✅ GOOD: Ask for "events grouped by time ranges: 0-3, 3-6, 6-9, 9-12, 12-15, 15-18, 18-21, 21-24"
+    - ✅ GOOD: For NoQL databases with timestamp fields, use EXTRACT to get hour then bucket with CASE:
+      * "CASE WHEN HOUR(TO_DATE(timestamp * 1000)) >= 0 AND HOUR(TO_DATE(timestamp * 1000)) <= 2 THEN '0-3' ..."
+    - ❌ BAD: "Show events for each hour 0-23" (too granular, 24 bars is too many)
+    - ❌ BAD: Grouping by individual hours when asked about hourly patterns
+    - ❌ BAD: Using HOUR() function directly - use EXTRACT(hour FROM ...) for NoQL
+    - Examples of good hourly chart questions:
+      * "Show event distribution by time ranges (0-3, 3-6, 6-9, 9-12, 12-15, 15-18, 18-21, 21-24)"
+      * "What are the busiest time ranges throughout the day using 3-hour intervals?"
+  
+  * **📅 MONTHLY DATA - CONVERT TO MONTH NAMES:**
+    - When asking for monthly data, ALWAYS request month names, NOT numbers
+    - ✅ GOOD: "Show new contacts created per month with month names (January, February, March...)"
+    - ✅ GOOD: Include instruction: "convert month numbers to month names using CASE statement"
+    - ❌ BAD: "Show contacts per month" (will return numbers 1, 2, 3... which is confusing)
+    - Example chart question: "Count of new contacts created per month, with months shown as January, February, March, etc."
+
+🚨 **MANDATORY NoQL PATTERN FOR MONTHLY CHARTS:**
+```noql
+SELECT 
+  CASE MONTH(TO_DATE(created_at_timestamp * 1000))
+    WHEN 1 THEN 'January' WHEN 2 THEN 'February' WHEN 3 THEN 'March'
+    WHEN 4 THEN 'April' WHEN 5 THEN 'May' WHEN 6 THEN 'June'
+    WHEN 7 THEN 'July' WHEN 8 THEN 'August' WHEN 9 THEN 'September'
+    WHEN 10 THEN 'October' WHEN 11 THEN 'November' WHEN 12 THEN 'December'
+  END AS month,
+  COUNT(*) AS count
+FROM contacts
+GROUP BY MONTH(TO_DATE(created_at_timestamp * 1000))
+ORDER BY MONTH(TO_DATE(created_at_timestamp * 1000))
+```
+- **NEVER** use `SELECT MONTH(...) AS month` - this returns numbers!
+- **ALWAYS** use the CASE statement above for month names!
   
   * **Avoid unnecessary JOINs** - Only join if you NEED data from another table
     - ✅ GOOD: `SELECT t.[field], COUNT(*) FROM [table] t GROUP BY t.[field]` (if field exists in table)
@@ -694,17 +1252,19 @@ Guidelines:
   ✓ Different chart type when appropriate (bar vs line vs pie)
   ✓ Different time period (last 30 days vs last 60 days vs last 90 days)
 
-- **ALWAYS aim for 2-4 diverse charts** - BUT only if the question allows for multiple perspectives
-- **🚨 CRITICAL: If question has only ONE specific answer → Generate ONLY 1 chart**
-  * ONE specific answer questions: "contacts per org", "users by status", "top 10 products" → 1 chart only
-  * MULTIPLE perspective questions: "analyze events", "understand contact behavior", "explore data" → 2-4 charts
-- Complex analysis → 2-4 charts | Simple COUNT/GROUP BY question → 1 chart
+- **🚨🚨🚨🚨🚨 ABSOLUTE RULE: GENERATE EXACTLY 1 CHART - ONE CHART ONLY - NEVER 2 OR MORE 🚨🚨🚨🚨🚨**
+- **MANDATORY: Always generate EXACTLY 1 chart** - This rule applies to 100% of questions
+- **ONE CHART ONLY for ALL questions**: "contacts per org", "users by status", "top 10 products", "hourly activity", "event types", "most common X", "count by Y", "messages by hour", "breakdown by channel", "hourly breakdown", "activity by time", etc. - ALL get exactly 1 chart
+- **NEVER generate 2-4 charts** unless question EXPLICITLY says: "show me multiple charts", "different perspectives", "multiple views", "analyze from different angles"
+- **When in doubt: Generate EXACTLY 1 chart** - This is always the correct answer
+- **DO NOT generate multiple charts for ANY reason** - Complexity doesn't mean multiple charts, it means a better single chart
+- **REMEMBER: ONE QUESTION = ONE CHART** - Always
 - Each chart should reveal a DIFFERENT aspect: time, category, status, type, agent, comparison, etc.
 - Use the exact format: ```chart
 {{"type": "bar|line|pie|scatter", "question": "specific query", "title": "Simple title", "db": "{database_name}"}}
 ```
 
-- **✅ EXAMPLES OF TRULY DIVERSE CHARTS (FOR REFERENCE - DON'T SHOW SQL TO USER):**
+- **✅ EXAMPLES OF TRULY DIVERSE CHARTS (FOR REFERENCE - DON'T SHOW QUERIES TO USER):**
   
   **Example 1: "Events per day of week"** → Generate 3 DIFFERENT charts:
   ```chart
@@ -768,9 +1328,9 @@ Guidelines:
   ```
   (This answers the question completely)
   
-  **When to generate multiple charts:** User asks "Analyze our contacts" or "Understand event patterns" → Then show 2-4 DIFFERENT perspectives
+  **When to generate multiple charts:** ONLY when user EXPLICITLY says "show me multiple charts" or "different perspectives" - Otherwise generate exactly 1 chart
   
-  **🚨 CRITICAL: DON'T include SQL code in your response to users!** The chart blocks will automatically generate the queries. Just include the ```chart blocks and your natural language explanation.
+  **🚨 CRITICAL: DON'T include NoQL code in your response to users!** The chart blocks will automatically generate the queries. Just include the ```chart blocks and your natural language explanation.
   
 - **❌ BAD EXAMPLES (DUPLICATES - NEVER DO THIS):**
   
@@ -819,11 +1379,6 @@ When a chart would help illustrate your points, mention it naturally:
 - ✅ "Distribution across categories" → bar
 - ❌ NOT for trends over time (use line instead)
 
-**HORIZONTAL_BAR** → Use for rankings with long labels
-- ✅ "Top entities ranked by metric" → horizontal_bar
-- ✅ "Items ranked by count/value" → horizontal_bar
-- ✅ Best when labels are long names that need space
-
 **LINE CHART** → ONLY for trends over time or continuous progression
 - ✅ "Metric growth from [start] to [end]" → line
 - ✅ "Monthly/daily trends" → line
@@ -848,67 +1403,75 @@ When a chart would help illustrate your points, mention it naturally:
 - ❌ Using pie chart for >6 categories (use bar instead)
 - ❌ Using bar chart for time series trends (use line instead)
 
-Examples of the style and when to include charts:
+Examples of conversational style for CRM data:
 
-**EXAMPLE 1: Single Fact (No chart needed)**
-"What's China's population?"
-"China has approximately 1.4 billion people, which represents about 18% of the global population. This means that nearly one in every five people on Earth lives in China, making it by far the most populous country in the world.
-This massive population didn't happen overnight. China experienced rapid population growth throughout much of the 20th century, driven by improvements in healthcare and living conditions, combined with traditional cultural preferences for larger families..."
-**EXAMPLE 2: Rankings/Top N (Use BAR chart)**
-"Which countries have the largest populations?"
-"Global population distribution is highly concentrated among a relatively small number of countries. China leads with approximately 1.4 billion people, followed closely by India with 1.3 billion. The United States comes in third with about 330 million, representing a significant drop from the top two.
-```chart
-{{"type": "bar", "question": "top 10 countries by population", "title": "Most Populous Countries", "db": "world"}}
-```
-
-What's particularly striking about this distribution is how dramatically the numbers fall after the top few countries. Indonesia, Pakistan, and Brazil round out the top six, each with populations between 220-270 million people..."
-
-**EXAMPLE 3: Proportions/Percentages (Use PIE chart)**
-"What's the population distribution by continent?"
-"Continental population distribution reveals fascinating patterns about global demographics. Asia dominates with nearly 60% of the world's population, primarily due to China and India. Africa accounts for about 17% and is experiencing rapid growth.
+**EXAMPLE 1: Lead Status Distribution**
+"What are the leads by status?"
+"Looking at your current pipeline, I can see the leads are spread across different stages pretty evenly. Most of them are actively being worked on, which is good - you've got movement in the funnel.
 
 ```chart
-{{"type": "pie", "question": "population by continent", "title": "Global Population by Continent", "db": "world"}}
+{{"type": "bar", "question": "Distribution of leads by status", "title": "Leads by Status", "db": "zigment"}}
 ```
 
-Europe holds about 10% of global population, while North America represents roughly 8%. The remaining continents have much smaller shares..."
+What's interesting is that you have a good mix of leads in progress and converted ones. The fact that you're seeing leads move through the stages suggests your follow-up process is working. You might want to focus on pushing those in-progress ones toward conversion if possible."
 
-**EXAMPLE 4: A vs B Comparison (Use BAR chart, NOT line)**
-"Compare Entity A vs Entity B by metric"
-"When comparing these two entities, we see distinct differences in their scale. Entity A has a metric value of approximately X, while Entity B shows significantly more with around Y.
+**EXAMPLE 2: Source Performance Analysis**
+"Which lead sources perform best?"
+"I pulled up the numbers on your lead sources, and there's definitely a clear winner here. Some channels are bringing in not just more leads, but better quality ones that actually convert.
 
 ```chart
-{{"type": "bar", "question": "metric comparison for Entity A and Entity B", "title": "Metric Comparison: Entity A vs Entity B", "db": "{database_name}"}}
+{{"type": "bar", "question": "Conversion rates by lead source", "title": "Lead Source Performance", "db": "zigment"}}
 ```
 
-This difference reflects Entity B's larger operational scope and scale, positioning it as the stronger performer in this category..."
+This is really useful because it tells you where to focus your marketing budget. If one source is giving you high volumes but low conversion, and another is the opposite, you might want to double down on what's actually working."
 
-**EXAMPLE 5: Time Series/Trends (Use LINE chart)**
-"Show metric growth over time"
-"The metric has experienced significant evolution over the past several time periods. The data reveals a steady upward trajectory initially, with notable changes during specific periods.
+**EXAMPLE 3: Channel Engagement**
+"Which communication channels are most effective?"
+"So I looked at where you're getting the most engagement, and it's pretty clear which channels your contacts prefer. WhatsApp seems to be where most of the action happens.
 
 ```chart
-{{"type": "line", "question": "metric values by time period from [start] to [end]", "title": "Metric Growth Over Time", "db": "{database_name}"}}
+{{"type": "pie", "question": "Distribution of messages by channel", "title": "Messages by Channel", "db": "zigment"}}
 ```
 
-The pattern shows clear trends and demonstrates how the metric has evolved, with recovery or growth visible in recent periods..."
+This makes sense - people tend to respond faster on channels they use regularly. You might want to prioritize outreach on the channels where you're seeing the most engagement, since that's where your contacts are actually active."
 
-"Analyze [category/region]" (Include multiple DIFFERENT charts - different perspectives)
-"[Category] presents a fascinating study in diversity across multiple dimensions. From one perspective, the largest items show clear patterns, though the distribution varies significantly.
+**EXAMPLE 4: Conversion Trends**
+"Show conversion trends over time"
+"I tracked your conversions over the past few months, and there's a pretty interesting pattern here. You had some strong months, then things dipped a bit, and now it's picking back up.
 
 ```chart
-{{"type": "bar", "question": "top 10 items by primary metric", "title": "Top Items by Primary Metric", "db": "{database_name}"}}
+{{"type": "line", "question": "Monthly conversion rates over the last 12 months", "title": "Conversion Trend Analysis", "db": "zigment"}}
 ```
 
-However, the primary metric doesn't necessarily correlate with secondary metrics. When examining a different dimension, we see different leaders emerge, with some items showing exceptional performance on alternative measures.
+The trend shows some seasonality which is normal, but what I'd watch is whether those dips are something you can address. Maybe there's a pattern - like certain campaigns perform better at certain times, or maybe it's about following up faster when leads come in."
+
+**EXAMPLE 5: Contact Activity Patterns**
+"What times of day see the most contact activity?"
+"This is cool - I looked at when your contacts are most active, and there's a clear pattern. Most of the engagement happens during business hours, which makes total sense.
 
 ```chart
-{{"type": "bar", "question": "items by secondary metric", "title": "Items by Secondary Metric", "db": "{database_name}"}}
+{{"type": "bar", "question": "Contact activity by time ranges", "title": "Daily Activity Patterns", "db": "zigment"}}
 ```
 
-This diversity reflects the varied characteristics and patterns across the dataset..."
+The peak times are mid-morning and early afternoon. So if you're doing outreach, that's probably when you'll get the best response rates. Early morning or late evening might work for some people, but the bulk of activity is when you'd expect - during normal business hours."
 
-Be thorough, informative, and conversational - think "detailed professional discussion" not "excited presentation."
+**EXAMPLE 6: Lifecycle Stage Distribution**
+"What's the breakdown by lifecycle stage?"
+"Looking at where your contacts are in the journey, I can see most of them are in the middle stages - which is actually pretty good. It means they're progressing, not stuck at the beginning.
+
+```chart
+{{"type": "bar", "question": "Contacts by lifecycle stage", "title": "Lifecycle Stage Analysis", "db": "zigment"}}
+```
+
+What I'd pay attention to is if there's a stage where contacts are getting stuck. If you see a huge pile-up at one stage, that's probably where you need to focus more effort - maybe it needs better nurturing or a different approach."
+
+**CONVERSATIONAL STRUCTURE:**
+1. **Natural Opening**: Acknowledge what they asked, maybe with a quick observation
+2. **Walk Through the Data**: Talk through what you see in the chart naturally, like explaining to a friend
+3. **Share Insights**: Point out interesting patterns or what stands out to you
+4. **Actionable Thoughts**: Suggest what they might want to consider, but do it conversationally
+
+Write like you're having a friendly chat with someone who needs insights, not like you're delivering a formal presentation. Be engaging, natural, and helpful.
 """)
 
 # Grounding/rewrite prompt to ensure prose uses only chart-derived facts
@@ -937,6 +1500,32 @@ Return the revised markdown only.
 # Deep exploration prompt: propose small, fast exploratory SQLs from a question
 deep_explore_prompt = ChatPromptTemplate.from_template(
     """
+🚨🚨🚨 **CRITICAL BLOCKING RULES - READ FIRST!** 🚨🚨🚨
+
+❌ **ABSOLUTELY FORBIDDEN - USING THESE WILL CAUSE IMMEDIATE FAILURE:**
+- EXTRACT() function - DOES NOT EXIST IN NoQL! Use HOUR() instead!
+- BETWEEN operator - DOES NOT EXIST IN NoQL! Use >= AND <= instead!
+- UNIX_TIMESTAMP() - DOES NOT EXIST IN NoQL!
+- DATE_SUB() - DOES NOT EXIST IN NoQL!
+- CURRENT_DATE() - DOES NOT EXIST IN NoQL!
+- NOW() - DOES NOT EXIST IN NoQL!
+- INTERVAL - DOES NOT EXIST IN NoQL!
+
+✅ **ONLY USE THESE FOR DATE FILTERING:**
+- WHERE timestamp >= 1704067200 (numeric Unix timestamp)
+- WHERE created_at_timestamp >= 1710000000 (numeric Unix timestamp)
+
+🚨 **CRITICAL: is_deleted FIELD RULES - FOLLOW EXACTLY OR QUERY WILL FAIL!**
+- ✅ Tables WITH `is_deleted` field (ALWAYS use WHERE is_deleted = false):
+  * corecontacts - Use WHERE is_deleted = false
+  * events - Use WHERE is_deleted = false  
+  * chathistories - Use WHERE is_deleted = false
+- ❌ Tables WITHOUT `is_deleted` field (DO NOT use this filter):
+  * contacts - No is_deleted field, don't use this filter
+  * contacttags - No is_deleted field, don't use this filter
+
+🚨 **IF YOU USE ANY FORBIDDEN FUNCTION, THE QUERY WILL FAIL WITH INVALID_QUERY ERROR!**
+
 You propose quick EXPLORATORY NoQL queries for the CURRENT database to understand a question before writing analysis.
 
 **CRITICAL: ACTUAL COLLECTION NAMES (USE THESE IN YOUR QUERY)**
@@ -958,9 +1547,10 @@ Example: If schema shows "CONTACT", you MUST write "contacts" in your query.
 When user asks for "average PER conversation" or "count PER user", they want grouped results showing EACH entity with its count/metric, NOT a single average.
 
 ✅ CORRECT PATTERNS:
-- "average messages per conversation" → SELECT contact_id, COUNT(*) AS message_count FROM chathistories GROUP BY contact_id ORDER BY message_count DESC LIMIT 20
+- "average messages per conversation" → SELECT c.full_name, COUNT(ch._id) AS message_count FROM chathistories ch JOIN contacts c ON ch.contact_id = c._id WHERE ch.is_deleted = false GROUP BY c.full_name ORDER BY message_count DESC LIMIT 20
 - "average contacts per org" → SELECT org_id, COUNT(*) AS contact_count FROM contacts GROUP BY org_id ORDER BY contact_count DESC LIMIT 20
-- "messages per conversation" → SELECT contact_id, COUNT(*) AS message_count FROM chathistories GROUP BY contact_id ORDER BY message_count DESC LIMIT 20
+- "messages per conversation" → SELECT c.full_name, COUNT(ch._id) AS message_count FROM chathistories ch JOIN contacts c ON ch.contact_id = c._id WHERE ch.is_deleted = false GROUP BY c.full_name ORDER BY message_count DESC LIMIT 20
+- "who sent most messages" → SELECT c.full_name, COUNT(ch._id) AS message_count FROM chathistories ch JOIN contacts c ON ch.contact_id = c._id WHERE ch.is_deleted = false GROUP BY c.full_name ORDER BY message_count DESC LIMIT 20
 
 ⚠️ IMPORTANT: "Average per X" typically means show the DISTRIBUTION of counts per X, not a single average number.
 - If they want actual per-entity counts → GROUP BY entity and show results
@@ -975,7 +1565,7 @@ Many timestamp fields are stored as Unix epoch seconds (numbers).
 
 ❌ **FORBIDDEN MySQL Functions (NOT supported in NoQL):**
 - UNIX_TIMESTAMP(), DATE_SUB(), NOW(), INTERVAL, FROM_UNIXTIME(), DATE_FORMAT()
-- MySQL-style: DAYOFWEEK(), DAYOFMONTH(), DAYNAME(), MONTHNAME()
+- MySQL-style: DAYOFWEEK(), DAYOFMONTH(), DAYNAME(), MONTHNAME(), HOUR()
 - WEEK(), WEEKDAY(), DATE(), TIME(), STR_TO_DATE()
 
 ✅ **SUPPORTED NoQL SYNTAX REFERENCE:**
@@ -988,7 +1578,7 @@ Many timestamp fields are stored as Unix epoch seconds (numbers).
 - `CURRENT_DATE()` - Current date
 - `DATE_ADD(date, 'hour', 2)`, `DATE_SUBTRACT(date, 'day', 7)`
 - `DATE_DIFF(start_date, end_date, 'day')`
-- `EXTRACT(day|month|year|hour|minute|second from date_field)` - Use for non-dow extractions
+- `EXTRACT(day|month|year|hour|minute|second from date_field)` - Use for hour/minute/second extractions
 
 **Aggregates:**
 - `COUNT(*)`, `COUNT(DISTINCT field)`, `SUM(field)`, `AVG(field)`, `MIN(field)`, `MAX(field)`
@@ -1056,13 +1646,35 @@ TO_DATE(field * 1000)
 - `SELECT DATE_TRUNC(TO_DATE(created_at_timestamp * 1000), 'day') AS date, COUNT(*) FROM contacts GROUP BY date`
 - `SELECT MONTH(TO_DATE(timestamp * 1000)) AS month, COUNT(*) FROM events GROUP BY month`
 - `SELECT YEAR(TO_DATE(created_at * 1000)) AS year, COUNT(*) FROM contacts GROUP BY year`
+- `SELECT HOUR(TO_DATE(timestamp * 1000)) AS hour, COUNT(*) FROM events WHERE is_deleted = false GROUP BY hour` ← **For hour extraction**
 - `WHERE TO_DATE(timestamp * 1000) >= TO_DATE('2024-01-01')` (date comparison)
+
+**✅ CORRECT Example for hourly time ranges:**
+```sql
+SELECT 
+  CASE 
+    WHEN HOUR(TO_DATE(timestamp * 1000)) >= 0 AND HOUR(TO_DATE(timestamp * 1000)) <= 2 THEN '0-3'
+    WHEN HOUR(TO_DATE(timestamp * 1000)) >= 3 AND HOUR(TO_DATE(timestamp * 1000)) <= 5 THEN '3-6'
+    WHEN HOUR(TO_DATE(timestamp * 1000)) >= 6 AND HOUR(TO_DATE(timestamp * 1000)) <= 8 THEN '6-9'
+    WHEN HOUR(TO_DATE(timestamp * 1000)) >= 9 AND HOUR(TO_DATE(timestamp * 1000)) <= 11 THEN '9-12'
+    WHEN HOUR(TO_DATE(timestamp * 1000)) >= 12 AND HOUR(TO_DATE(timestamp * 1000)) <= 14 THEN '12-15'
+    WHEN HOUR(TO_DATE(timestamp * 1000)) >= 15 AND HOUR(TO_DATE(timestamp * 1000)) <= 17 THEN '15-18'
+    WHEN HOUR(TO_DATE(timestamp * 1000)) >= 18 AND HOUR(TO_DATE(timestamp * 1000)) <= 20 THEN '18-21'
+    ELSE '21-24'
+  END AS time_range,
+  COUNT(*) AS event_count
+FROM events
+WHERE is_deleted = false
+GROUP BY time_range
+ORDER BY time_range
+```
 
 **❌ WRONG Examples (will fail or return empty):**
 - `SELECT DAY_OF_WEEK(timestamp) FROM events` (timestamp is a number!)
 - `SELECT TO_DATE(timestamp) FROM events` (missing * 1000!)
 - `SELECT EXTRACT(dow FROM TO_DATE(timestamp * 1000)) FROM events` (returns empty - use DAY_OF_WEEK instead!)
 - `SELECT DAYOFWEEK(FROM_UNIXTIME(timestamp)) FROM events` (MySQL syntax - not supported!)
+- `SELECT EXTRACT(hour FROM TO_DATE(timestamp * 1000)) FROM events` (EXTRACT() not supported - use HOUR() instead!)
 
 **✅ For Regular DATE Fields (already date objects):**
 - `SELECT DAY_OF_WEEK(order_date) as dow, COUNT(*) FROM orders GROUP BY dow`
@@ -1095,7 +1707,7 @@ CRITICAL RULES:
 - **Group by ONE dimension only** - Avoid multi-column grouping
 - **Avoid unnecessary JOINs** - If field exists in main table, don't join for the same field
   * ✅ GOOD: `SELECT t.[field], COUNT(*) FROM [table] t GROUP BY t.[field]`
-  * ❌ BAD: `SELECT b.[field], COUNT(a._id) FROM [table_a] a JOIN [table_b] b ON a.[key] = b.[key]` (join not needed if field in table_a)
+  * ❌ BAD: `SELECT b.[field], COUNT(a._id) FROM [table_a] a JOIN [table_b] b ON a.[key] = b.[key] GROUP BY b.[field]` (join not needed if field in table_a)
 - **If you MUST join:** Use COUNT(DISTINCT ...) to avoid inflated counts
 - **Always use table alias prefixes** (e.g., `t.[column]` not `[column]`) to avoid ambiguity
 
@@ -1154,12 +1766,12 @@ def run_deep_exploration(question: str, database_name: str, max_queries: int = 3
     try:
         # Get schema, counts and samples for the prompt
         t1 = time.time()
-        schema_text = get_schema(database_name)
-        print(f"⏱️ Schema fetch: {time.time()-t1:.2f}s")
+        schema_text = _SCHEMA_JSON
+        print(f"Schema fetch: {time.time()-t1:.2f}s")
         
         t1 = time.time()
         counts_data = get_table_and_column_counts(database_name)
-        print(f"⏱️ Counts fetch: {time.time()-t1:.2f}s")
+        print(f"Counts fetch: {time.time()-t1:.2f}s")
         
         counts_text = safe_json_dumps(counts_data, ensure_ascii=False)[:2000]
         samples_text = safe_json_dumps(sample_database_tables(database_name), ensure_ascii=False)[:2000]
@@ -1193,9 +1805,9 @@ def run_deep_exploration(question: str, database_name: str, max_queries: int = 3
         # Generate exploration queries
         t1 = time.time()
         response = chain.invoke(input_data)
-        print(f"⏱️ LLM call: {time.time()-t1:.2f}s")
+        print(f"LLM call: {time.time()-t1:.2f}s")
         
-        print(f"🤖 LLM exploration response: {response}")
+        print(f"LLM exploration response: {response}")
         
         # Parse the JSON response - strip markdown fences if present
         try:
@@ -1229,32 +1841,26 @@ def run_deep_exploration(question: str, database_name: str, max_queries: int = 3
             # Execute each exploration query
             for i, exploration in enumerate(explorations[:max_queries]):
                 purpose = exploration.get("purpose", f"Query {i+1}")
-                sql_query = exploration.get("sql", "")
+                noql_query = exploration.get("sql", "")
                 
-                if not sql_query:
+                if not noql_query:
                     continue
                     
-                print(f"🔍 Exploration {i+1}: {purpose}")
-                print(f"   SQL: {sql_query}")
+                print(f"Exploration {i+1}: {purpose}")
+                print(f"   Query: {noql_query}")
                 
                 try:
-                    # Strip SQL fences and execute
+                    # Strip query fences and execute
                     t1 = time.time()
-                    clean_query = _strip_sql_fences(sql_query)
-                    clean_query = ensure_limit(clean_query, 20)  # Safety limit
+                    clean_query = normalize_query(noql_query, 20)
                     
-                    # Validate query against schema before execution
-                    validation_result = validate_sql_against_schema(clean_query, database_name)
-                    if not validation_result["valid"]:
-                        print(f"   ❌ Schema validation failed: {validation_result['error']}")
-                        facts.append(f"{purpose}: schema validation error - {validation_result['error']}")
-                        continue
+                    # Schema validation disabled - using hardcoded schema
                     
                     rows, columns = run_query(clean_query, database_name, return_columns=True)
-                    print(f"   ⏱️ Query execution: {time.time()-t1:.2f}s")
+                    print(f"   Query execution: {time.time()-t1:.2f}s")
                     
                     if rows:
-                        print(f"   ✅ Found {len(rows)} results")
+                        print(f"   SUCCESS: Found {len(rows)} results")
                         # Add facts from this exploration
                         facts.append(f"{purpose}: {len(rows)} records found")
                         
@@ -1275,7 +1881,7 @@ def run_deep_exploration(question: str, database_name: str, max_queries: int = 3
                             if len(first_row) >= 2:
                                 facts.append(f"{purpose}: top result - {columns[0]}: {first_row[0]}, {columns[1]}: {first_row[1]}")
                             
-                            # Add SQL methodology for transparency
+                            # Add query methodology for transparency
                             if "ranking" in purpose.lower() or "top" in purpose.lower():
                                 facts.append(f"Ranking methodology: {clean_query[:200]}...")
                         else:
@@ -1419,7 +2025,7 @@ def generate_casual_response(question: str, database_name: str) -> str:
     if 'what can you do' in q_lower or 'what do you do' in q_lower or 'help' in q_lower:
         return f"""I'm **Insight**, your conversational data analyst! Here's what I can do:
 
-📊 **Natural language queries** - Just ask in plain English, no SQL needed
+📊 **Natural language queries** - Just ask in plain English, no NoQL needed
 📈 **Smart visualizations** - I automatically create the best charts for your data
 🔍 **Deep insights** - I explore patterns and trends you might miss
 💡 **Intelligent suggestions** - I'll recommend follow-up questions to uncover more
@@ -1436,7 +2042,7 @@ What would you like to discover?"""
     
     # Who are you / What are you / What's your name
     if 'who are you' in q_lower or 'what are you' in q_lower or 'your name' in q_lower:
-        return f"I'm **Insight** 🤖 - your AI-powered data analyst! I turn your questions into SQL queries, create beautiful visualizations, and help you discover insights in your `{database_name}` database. Think of me as your friendly data expert who speaks plain English! 😊"
+        return f"I'm **Insight** 🤖 - your AI-powered data analyst! I turn your questions into NoQL queries, create beautiful visualizations, and help you discover insights in your `{database_name}` database. Think of me as your friendly data expert who speaks plain English! 😊"
     
     # Goodbye
     if any(bye in q_lower for bye in ['bye', 'goodbye', 'see you', 'cya']):
@@ -1487,8 +2093,8 @@ You are a data visualization critic. Your job is to decide if a proposed chart i
 **STRICT VALIDATION CRITERIA:**
 
 🚫 **REJECT THE CHART IF (USELESS VISUALIZATIONS):**
-1. **Single item only** - Only 1 data point (e.g., "Colombia Airlines: 500" - nothing to compare)
-   - Example: Bar chart with ONE airline, pie chart with ONE slice
+1. **Single item only** - Only 1 data point (e.g., "John Smith: 5 messages" - nothing to compare)
+   - Example: Bar chart with ONE contact, pie chart with ONE slice
    - Reason: No comparison, distribution, or trend - just one number
    - **CRITICAL**: Bar charts with 1 data point are ALWAYS useless - they show no comparison
    
@@ -1500,8 +2106,8 @@ You are a data visualization critic. Your job is to decide if a proposed chart i
    - Scatter plot of non-numeric data
 
 4. **Question asks for comparison but chart shows only 1 entity:**
-   - Question: "Compare airlines" → Chart shows only 1 airline ❌
-   - Question: "Flight frequency" → Chart shows only 1 route ❌
+   - Question: "Compare contacts" → Chart shows only 1 contact ❌
+   - Question: "Message activity" → Chart shows only 1 channel ❌
 
 ✅ **APPROVE THE CHART IF:**
 1. **2+ data points for comparison** - Shows ranking, comparison, or distribution
@@ -1511,38 +2117,38 @@ You are a data visualization critic. Your job is to decide if a proposed chart i
 
 **EXAMPLES OF CHARTS TO REJECT:**
 
-❌ **REJECT** - "Flight Frequency Comparison in Colombia Airlines"
-   - Data: Colombia Airlines: 500 (ONLY 1 ITEM!)
-   - Reason: Single bar chart is useless, just say "Colombia Airlines has 500 flights"
-   - Better: Show frequency across MULTIPLE airlines or routes
+❌ **REJECT** - "Top Contacts by Message Count"
+   - Data: John Smith: 25 (ONLY 1 ITEM!)
+   - Reason: Single bar chart is useless, just say "John Smith sent 25 messages"
+   - Better: Show top 5-10 contacts or use text: "John Smith is the most active contact with 25 messages"
 
-❌ **REJECT** - "Top Airlines by Flight Count"
-   - Data: American Airlines: 1500 (ONLY 1 ITEM!)
+❌ **REJECT** - "WhatsApp Message Activity"
+   - Data: WhatsApp: 150 (ONLY 1 CHANNEL!)
    - Reason: Bar chart with single data point provides no comparison value
-   - Better: Show top 5-10 airlines or use text: "American Airlines operates 1,500 flights"
+   - Better: Show all channels or use text: "WhatsApp generated 150 messages"
 
-❌ **REJECT** - "Airport Count by Country"
-   - Data: United States: 15000 (ONLY 1 COUNTRY!)
+❌ **REJECT** - "Contact Status Distribution"
+   - Data: CONVERTED: 50 (ONLY 1 STATUS!)
    - Reason: No comparison, just one number
-   - Better: Show top 10 countries or regional distribution
+   - Better: Show all statuses or regional distribution
 
-❌ **REJECT** - "Market Share"
-   - Data: Company A: 100% (ONLY 1 SLICE!)
+❌ **REJECT** - "Channel Usage"
+   - Data: WhatsApp: 100% (ONLY 1 SLICE!)
    - Reason: Pie chart with 1 slice is meaningless
-   - Better: Show breakdown by multiple companies or segments
+   - Better: Show breakdown by multiple channels or segments
 
 **EXAMPLES OF CHARTS TO APPROVE:**
 
-✅ **APPROVE** - "Top 5 Airlines by Flight Frequency"
-   - Data: Colombia: 500, Tunisia: 400, Kenya: 350, Ghana: 300, Uganda: 250
-   - Reason: Shows meaningful comparison across 5 airlines
+✅ **APPROVE** - "Top 5 Contacts by Message Count"
+   - Data: John Smith: 25, Jane Doe: 20, Bob Wilson: 15, Alice Brown: 12, Tom Green: 10
+   - Reason: Shows meaningful comparison across 5 contacts
 
-✅ **APPROVE** - "Flight Frequency: Colombia Airlines vs Tunisia Airlines"
-   - Data: Colombia: 500, Tunisia: 400
-   - Reason: Direct comparison between 2 entities (minimum for comparison)
+✅ **APPROVE** - "Message Activity: WhatsApp vs Email"
+   - Data: WhatsApp: 150, Email: 80
+   - Reason: Direct comparison between 2 channels (minimum for comparison)
 
-✅ **APPROVE** - "Airport Traffic Growth 2010-2023"
-   - Data: 14 years of time series data
+✅ **APPROVE** - "Contact Growth 2020-2024"
+   - Data: 5 years of time series data
    - Reason: Shows trend over time with sufficient data points
 
 **DECISION:**
@@ -1558,497 +2164,19 @@ Respond with EXACTLY one of these:
 Your decision:
 """)
 
-# Narrative generation prompt for charts (single or multiple) - DETAILED CONVERSATIONAL
-narrative_prompt = ChatPromptTemplate.from_template("""
-You're having a thoughtful, detailed conversation with someone curious about data. Give them a rich, informative discussion with lots of context and detail. Don't be overly excited or "hysterical" - just be knowledgeable and genuinely interested.
 
-Their question: {question}
-Charts available: {chart_info}
 
-Write substantial, detailed responses that really dive into the topic. Think of it like explaining something fascinating to a colleague over coffee - thorough, informative, and conversational but not overly enthusiastic.
 
-Return JSON format with detailed, natural conversation:
-{{
-  "introduction": "Start with a thoughtful, detailed explanation of what you discovered. Give context, background, and set up the topic thoroughly. Write 3-4 sentences minimum.",
-  "transitions": [
-    "Write substantial text between charts - explain what the previous chart showed, provide additional context, and naturally introduce the next perspective. Give detailed commentary. 3-4 sentences each.",
-    "Continue with more detailed discussion, connecting the data points and providing deeper analysis. Explain patterns, comparisons, and what's interesting about the progression."
-  ],
-  "insights": [
-    "Share detailed observations about the data - not bullet points, but full conversational paragraphs. Explain the implications and context behind what you're seeing.",
-    "More detailed analysis and thoughtful commentary. Connect different aspects of the data and explain why these patterns matter."
-  ],
-  "conclusion": "Wrap up with a substantial summary that ties everything together. Provide final thoughts and context. 3-4 sentences minimum."
-}}
+# get_schema() removed - use _SCHEMA_JSON directly (JSON string) or get_hardcoded_schema() (dict)
 
-Write like you're having a detailed, informative conversation - not excited or hysterical, just knowledgeable and thorough.
-
-🔍 **RANKING TRANSPARENCY REQUIREMENTS:**
-When discussing rankings or "top" lists, you MUST include:
-1. **Methodology Explanation**: Clearly state the ranking criteria (e.g., "Ranked by total count", "Sorted by value DESC")
-2. **Data Source Transparency**: Mention the specific tables/columns used
-3. **Chart References**: For each ranking mentioned, include a chart reference {{chart:id}} 
-4. **Sample Data**: Show actual numbers from your analysis (e.g., "Entity A: 5,234 items, Entity B: 4,891 items")
-5. **Time Period**: Specify the data period if relevant
-
-**Example of GOOD ranking explanation:**
-"The top entities by volume are ranked using `COUNT(id)` from the main table, grouped by category. The analysis shows:
-
-{{chart:volume_ranking}}
-
-Based on this data:
-- **#1: Category A** - 5,234 total records (18.2% of all data)  
-- **#2: Category B** - 4,891 total records (17.0% of all data)
-- **#3: Category C** - 3,567 total records (12.4% of all data)
-
-This ranking uses all available data and counts all record types equally."
-
-❌ **AVOID vague statements** like:
-- "Items rank highly based on various factors"
-- "The data shows interesting patterns"
-- "Rankings can vary depending on methodology"
-
-✅ **PROVIDE specific statements** like:
-- "Ranked by COUNT(record_id) grouped by category_id"
-- "Top performer leads with 1,247 records, followed by second place with 1,156 records"
-- "This analysis covers data from the current dataset period"
-""")
-
-# Chart suggestion prompt for both single and multiple chart generation
-chart_suggestion_prompt = ChatPromptTemplate.from_template("""
-Analyze this question and suggest 4-6 different chart types that would best visualize the data. Always aim for MAXIMUM INSIGHT DIVERSITY by creating multiple complementary perspectives.
-
-🚀 **ENHANCED ROBUSTNESS REQUIREMENTS:**
-- For simple questions: Generate at least 4 different chart perspectives
-- For complex questions: Generate 5-6 charts covering all major analytical dimensions
-- Always include at least one overview chart and one detailed breakdown chart
-- Create charts at different aggregation levels (individual → grouped → summary)
-- Include temporal analysis when date/time data is available
-- Add comparative analysis whenever possible (vs averages, vs previous periods, vs segments)
-
-🎯 **CRITICAL: AVOID DATA REDUNDANCY - ENSURE DIVERSE INSIGHTS**
-Each chart must provide UNIQUE data perspectives, NOT just different metrics of the same entities:
-
-❌ **FORBIDDEN REDUNDANT PATTERNS:**
-- "Top 20 Countries by Population" + "Top 20 Countries by GNP" (same countries, different metrics)
-- "Sales by Product A-M" + "Sales by Product N-Z" (same data type, different ranges)
-- "Customer Revenue Q1" + "Customer Revenue Q2" (same customers, different periods)
-
-📊 **RANKING VISUALIZATION BEST PRACTICES:**
-
-**Chart Type Selection by Data Size:**
-- **3-5 items**: Use "bar" (vertical bars work well)
-- **6-10 items**: Use "horizontal_bar" (better for category names)
-- **11-20 items**: Use "lollipop" (cleaner, less cluttered)
-- **21+ items**: Use "table" with embedded bars or "treemap"
-
-**Chart Type Selection by Purpose:**
-- **Value comparison**: "horizontal_bar" or "lollipop"
-- **Ranking order focus**: "lollipop" or "slope"
-- **Changes over time**: "slope" or "bump"
-- **Hierarchical data**: "treemap"
-- **Proportional view**: "pie" (only for ≤6 categories)
-
-**Ranking Enhancement Rules:**
-- Always sort data in descending order (highest first)
-- For rankings, include rank numbers in titles
-- Use color gradients to emphasize top performers
-- Add value labels for precise reading
-
-**Ranking Subsection Charts (CRITICAL):**
-When the question involves rankings or "top" analysis, generate specific charts for EACH ranking dimension mentioned:
-**Entity Volume Rankings Should Include:**
-- "Volume by Category" (horizontal_bar) - Total counts per category
-- "Activity Rankings" (lollipop) - Busiest entities by volume  
-- "Frequency Analysis" (horizontal_bar) - Most active relationships
-- "Temporal Patterns" (line) - Activity frequency by time period
-- "Performance Comparison" (scatter) - Entities plotted by multiple metrics
-- "Operational Metrics" (table) - Detailed performance data
-**Location/Geographic Rankings Should Include:**
-- "Outbound Activity Rankings" (horizontal_bar) - Entities by outgoing activity
-- "Inbound Activity Analysis" (lollipop) - Entities by incoming activity  
-- "Total Activity Rankings" (horizontal_bar) - Combined inbound + outbound activity
-- "Geographic Distribution" (treemap) - Activity by region/location
-- "Capacity vs Usage" (scatter) - Entity size vs activity volume
-**Category/Group Rankings Should Include:**
-- "Size vs Activity" (scatter) - Operational efficiency analysis
-- "Coverage Rankings" (horizontal_bar) - Categories by scope/reach
-- "Market Share Analysis" (pie) - Category share by total volume
-- "Performance Trends" (line) - Category growth/decline over time
-
-✅ **REQUIRED DIVERSIFICATION STRATEGIES:**
-1. **Entity Diversity**: Different countries/customers/products in each chart
-2. **Grouping Diversity**: Individual items vs grouped categories vs aggregated summaries
-3. **Perspective Diversity**: Geographic vs demographic vs temporal vs performance views
-4. **Scale Diversity**: Detailed breakdowns vs high-level overviews
-5. **Analytical Diversity**: Rankings, distributions, correlations, trends, comparisons
-6. **Temporal Diversity**: Current state, historical trends, period comparisons, growth rates
-7. **Statistical Diversity**: Averages, medians, percentiles, outliers, variance analysis
-
-🎯 **COMPREHENSIVE CHART STRATEGY FRAMEWORK:**
-
-**Level 1 - Overview Charts (Always Include):**
-- High-level summary or total view
-- Key performance indicators
-- Overall distribution or breakdown
-
-**Level 2 - Detailed Analysis Charts:**
-- Top/bottom performers with rankings
-- Detailed breakdowns by categories
-- Individual entity analysis
-
-**Level 3 - Comparative Analysis Charts:**
-- Period-over-period comparisons
-- Segment vs segment analysis
-- Performance vs benchmarks/averages
-
-**Level 4 - Advanced Analytics Charts:**
-- Trend analysis and growth patterns
-- Correlation and relationship analysis
-- Statistical distributions and outliers
-
-**Level 5 - Contextual Charts:**
-- Geographic/regional perspectives
-- Time-based patterns and seasonality
-- Market share or relative performance
-
-**GOOD DIVERSE EXAMPLES:**
-- "Top 20 Countries by Population" + "Population by Continent" + "Population Growth Trends"
-- "Sales by Product Category" + "Sales by Region" + "Monthly Sales Trends"
-- "Customer Demographics" + "Purchase Patterns" + "Geographic Distribution"
-
-**CHART COMBINATION RULES:**
-- If Chart 1 shows individual entities (countries), Chart 2 should show grouped categories (continents)
-- If Chart 1 shows current data, Chart 2 should show trends or comparisons  
-- If Chart 1 shows one dimension, Chart 2 should show a different dimension entirely
-
-**COMPREHENSIVE EXAMPLES FOR ROBUST CHART GENERATION:**
-
-**Example 1: "Customer Analysis" (6 diverse charts):**
-✅ EXCELLENT:
-1. "Top 20 Customers by Revenue" (bar) - Individual rankings
-2. "Customer Revenue Distribution" (pie) - Segment breakdown  
-3. "Customer Acquisition Trends" (line) - Temporal analysis
-4. "Revenue vs Order Frequency" (scatter) - Correlation analysis
-5. "Customer Geographic Distribution" (table) - Regional perspective
-6. "Customer Lifetime Value Percentiles" (bar) - Statistical analysis
-
-**Example 2: "Product Performance Analysis" (5 diverse charts):**
-✅ EXCELLENT:
-1. "Product Category Revenue Share" (pie) - Overview breakdown
-2. "Top Performing Individual Products" (bar) - Detailed rankings
-3. "Product Sales Trends Over Time" (line) - Temporal patterns
-4. "Price vs Sales Volume Correlation" (scatter) - Relationship analysis
-5. "Product Performance by Region" (table) - Geographic context
-
-**Example 3: "Financial Analysis" (6 diverse charts):**
-✅ EXCELLENT:
-1. "Monthly Revenue Overview" (line) - Temporal overview
-2. "Revenue by Business Unit" (pie) - Categorical breakdown
-3. "Top Revenue Generating Accounts" (bar) - Individual rankings
-4. "Profit Margin Distribution" (bar) - Statistical distribution
-5. "Revenue Growth Rate by Quarter" (line) - Growth analysis
-6. "Revenue vs Expenses Correlation" (scatter) - Relationship analysis
-
-**Example 4: "Geographic Analysis" (5 diverse charts):**
-✅ EXCELLENT:
-1. "Sales by Country/Region" (bar) - Geographic rankings
-2. "Regional Market Share" (pie) - Proportional view
-3. "Geographic Growth Trends" (line) - Temporal geographic analysis
-4. "Population vs Sales Correlation by Region" (scatter) - Demographic analysis
-5. "Regional Performance Metrics" (table) - Comprehensive regional data
-
-Available chart types: bar, horizontal_bar, line, pie, scatter, table, lollipop, slope, bump, treemap, area, histogram, heatmap, stacked_bar
-
-Guidelines:
-- bar → categorical comparisons, counts, rankings, top/bottom lists (best for 3-20 categories)
-- horizontal_bar → rankings with long category names, top 10 lists, professional dashboards (6-15 items)
-- lollipop → clean rankings, emphasis on values, modern look (10-25 items)
-- line → trends over time, sequential data, year-over-year analysis  
-- slope → ranking changes between two periods, before/after comparisons
-- bump → ranking changes over multiple time periods, trend analysis
-- pie → ONLY for part-to-whole relationships with 3-6 categories MAX (never use for customer lists, individual records, or >6 items)
-- scatter → ONLY for correlation/relationship between TWO NUMERIC variables (never use categorical data like names/government forms)
-- table → detailed data, individual records, or >10 categories (20+ items)
-- treemap → hierarchical data, nested categories, proportional visualization
-- area → cumulative trends, stacked time series, filled line charts
-- histogram → distribution analysis, frequency analysis, statistical patterns
-- heatmap → two-dimensional correlation, geographic data, intensity mapping
-- stacked_bar → component breakdown, multi-category comparisons
-
-⚠️ **CRITICAL PIE CHART RESTRICTIONS:**
-🚫 **ABSOLUTELY FORBIDDEN PIE CHARTS:**
-- Individual customers/people (like "Customer Purchase Distribution")
-- Individual products, cities, or detailed records
-- ANY data with >6 distinct categories
-- Lists of names, IDs, or specific entities
-
-✅ **ONLY ALLOWED PIE CHARTS:**
-- High-level categories: Continents (7 max), Product Lines (5-6), Departments
-- Geographic regions: North/South/East/West, Major regions only
-- Time periods: Quarters (4), Seasons (4), Years (if ≤6)
-- Status categories: Active/Inactive, High/Medium/Low
-
-**CRITICAL RULE: If you're tempted to use a pie chart, ask:**
-- "Are there more than 6 slices?" → Use bar chart instead
-- "Are these individual people/customers?" → Use bar chart instead  
-- "Are these specific items/products?" → Use bar chart instead
-
-**GOOD pie chart examples:**
-- "Sales by Continent" (7 continents max)
-- "Revenue by Product Category" (4-5 categories)
-- "Orders by Quarter" (4 quarters)
-
-**BAD pie chart examples (USE BAR INSTEAD):**
-- "Customer Purchase Distribution" (59 customers = TERRIBLE!)
-- "Sales by Individual Product" (100+ products)
-- "Revenue by City" (50+ cities)
-- "Purchases by Employee" (20+ employees)
-
-⚠️ **SCATTER CHART REQUIREMENTS:**
-🚫 **ABSOLUTELY FORBIDDEN SCATTER CHARTS:**
-- Any chart where X or Y axis would be categorical text (names, government forms, categories)
-- Charts with only one numeric variable
-- Lists of countries/cities without numeric relationships
-
-✅ **ONLY ALLOWED SCATTER CHARTS:**
-- Two numeric variables showing correlation: Population vs GNP, Sales vs Profit, Age vs Income
-- Numeric performance metrics: Revenue vs Customers, Rating vs Box Office
-- Scientific/statistical relationships: Height vs Weight, Temperature vs Sales
-
-**GOOD scatter chart examples:**
-- "Population vs Economic Output" (Population on X, GNP on Y)
-- "Movie Rating vs Box Office Revenue" (Rating on X, Revenue on Y)
-- "Customer Age vs Purchase Amount" (Age on X, Amount on Y)
-
-**BAD scatter chart examples (USE BAR/TABLE INSTEAD):**
-- "Countries by Government Form" (Government Form is categorical!)
-- "Customer Names vs Purchase History" (Names are not numeric!)
-- "Product Categories vs Sales" (Categories are not continuous!)
-
-**CRITICAL RULE: If either axis would show text labels instead of numeric scales, DO NOT use scatter plot!**
-
-⚠️ **TABLE CHART REQUIREMENTS:**
-- For table charts, ALWAYS select MULTIPLE DIVERSE columns to show comprehensive data
-- NEVER repeat the same column twice in a table
-- Include identifying columns (Name, Title, etc.) + multiple data columns (Population, GNP, LifeExpectancy, etc.)
-- Example: For countries, select Name, Population, GNP, LifeExpectancy, SurfaceArea (NOT just Name, LifeExpectancy, LifeExpectancy)
-- For population data: Show UNIQUE entities (countries/cities), not repetitive regions
-- AVOID: Multiple rows with same region/category name - this creates confusing tables
-- PREFER: Country-level data over historical/regional breakdowns for tables
-- Example: Instead of "Australia and New Zealand" appearing 3 times, show 3 different countries
-
-🔥 **CRITICAL SQL GENERATION RULES:**
-- When generating SQL for any chart type, ensure each column in SELECT is UNIQUE
-- For detailed/table data: Select 4-6 DIFFERENT columns that provide varied insights
-- FORBIDDEN: SELECT a.Name, a.Population, a.Population (duplicate Population)
-- REQUIRED: SELECT a.Name, a.Population, a.GNP, a.LifeExpectancy (all different)
-- Each column must add new information, not repeat existing data
-
-📊 **CHART-SPECIFIC SQL REQUIREMENTS:**
-- **Bar Charts**: For "largest X by Y", ensure ONE result per category (use window functions/subqueries)
-- **Pie Charts**: ONLY for high-level groupings with ≤6 categories. Group individual items into broader categories.
-  - ✅ GOOD: "SELECT continent, SUM(population) FROM country GROUP BY continent" (7 continents)
-  - ❌ BAD: "SELECT customer_name, total_purchases FROM customers" (59 individual customers)
-  - **RULE**: If query returns >6 rows, use bar chart instead of pie
-- **Tables**: Show UNIQUE entities with comprehensive data - avoid repetitive rows.
-  - ✅ GOOD: "SELECT DISTINCT a.Name, a.Population, a.GNP, a.LifeExpectancy FROM country a ORDER BY a.Population DESC LIMIT 50"
-  - ✅ GOOD: "SELECT a.continent, AVG(a.population), COUNT(*) as countries FROM country a GROUP BY a.continent"  
-  - ❌ BAD: "SELECT a.region, a.year, a.population FROM historicaldata a" (repetitive regions)
-  - ❌ BAD: Historical/time-series data that shows same entity multiple times
-  - **RULE**: Each row should represent a UNIQUE entity (country, customer, product), not repeated categories
-
-🎯 **CRITICAL: ALWAYS SORT AND LIMIT LARGE DATASETS**
-- **ALWAYS use ORDER BY** to get the most important/relevant results first
-- **For rankings**: ORDER BY [metric] DESC (highest first)
-- **For alphabetical**: ORDER BY [name] ASC  
-- **For time series**: ORDER BY [date] DESC (most recent first)
-- **Examples**:
-  - ✅ "SELECT a.Name, a.Population FROM country a ORDER BY a.Population DESC" (largest countries first)
-  - ✅ "SELECT a.title, b.avg_rating FROM movie a JOIN ratings b ON a.id = b.movie_id ORDER BY b.avg_rating DESC" (best movies first)
-  - ✅ "SELECT a.Name, SUM(b.Total) FROM customer a JOIN invoice b ON a.CustomerId = b.CustomerId GROUP BY a.Name ORDER BY SUM(b.Total) DESC" (top customers first)
-- **Backend will automatically limit results**: Pie (6), Bar (20), Line (50), Scatter (100), Table (50)
-
-Database Schema: {schema}
-Question: {question}
-
-Return JSON format with 3-6 suggestions for maximum analytical robustness:
-{{
-  "suggestions": [
-    {{
-      "chart_type": "bar|line|pie|scatter|table",
-      "title": "Descriptive title for this chart",
-      "reason": "Why this chart type is useful for this data",
-      "sql_focus": "What aspect of the data this chart should focus on",
-      "analysis_level": "overview|detailed|comparative|advanced|contextual"
-    }}
-    // MINIMUM 3 charts required for any question
-    // MAXIMUM 6 charts to maintain performance
-    // Each chart MUST provide unique analytical perspective
-    // Include mix of analysis levels: overview + detailed + comparative/advanced
-  ]
-}}
-
-🔥 **ROBUSTNESS VALIDATION CHECKLIST:**
-Before finalizing suggestions, verify:
-✅ At least 3 different chart types
-✅ At least 2 different analysis levels (overview, detailed, comparative, etc.)
-✅ No redundant data perspectives (same entities with different metrics)
-✅ Mix of aggregation levels (individual, grouped, summary)
-✅ Include temporal analysis if date/time data available
-✅ Include comparative analysis when possible
-✅ Each chart answers a different analytical question
-
-📊 **COMPREHENSIVE RANKING ANALYSIS EXAMPLE:**
-For a question like "How are entity rankings determined?", generate charts like:
-
-1. **"Volume Rankings by Category"** (horizontal_bar)
-   - SQL Focus: "COUNT(record_id) grouped by category, ordered by count DESC"
-   - Purpose: Show which categories have the most records/activity
-   
-2. **"Entity Activity Distribution"** (lollipop)  
-   - SQL Focus: "Entity inbound + outbound activity counts, ranked by total volume"
-   - Purpose: Identify most active entities by combined metrics
-   
-3. **"Relationship Frequency Analysis"** (horizontal_bar)
-   - SQL Focus: "Most common relationships by count, entity-to-entity pairs"
-   - Purpose: Show which connections have the highest frequency
-   
-4. **"Temporal Activity Patterns"** (line)
-   - SQL Focus: "Activity counts by time period, showing operational patterns"
-   - Purpose: Reveal temporal patterns in entity behavior
-   
-5. **"Category Market Share"** (pie)
-   - SQL Focus: "Percentage of total activity per category, top 6 categories only"
-   - Purpose: Show market dominance and competitive landscape
-""")
-
-# Cache for schema ordering (per database)
-_schema_order_cache = {}
-
-def get_schema(database_name="zigment"):
-    """Get database schema information from API"""
-    try:
-        schema_dict = fetch_schema_from_api()
-        # Return as formatted JSON string for compatibility with existing code
-        return json.dumps(schema_dict, indent=2)
-    except Exception as e:
-        print(f"Error fetching schema: {e}")
-        return "{}"
-
-
-def get_available_databases():
-    """Return registered database names with simple descriptions."""
-    available: dict[str, str] = {}
-    for name in databases.keys():
-        available[name] = f"Configured database '{name}'"
-    return available
-
-# Simple in-memory cache for counts (expires after 5 minutes)
-_counts_cache = {}
-_counts_cache_time = {}
-
-# Persistent SQLite cache for schema counts
-SCHEMA_CACHE_DB = "schema_counts_cache.db"
-
-def init_schema_cache_db():
-    """Initialize the persistent schema counts cache database"""
-    conn = sqlite3.connect(SCHEMA_CACHE_DB)
-    cursor = conn.cursor()
-    
-    # Create table to store schema metadata and counts
-    cursor.execute("""
-        CREATE TABLE IF NOT EXISTS schema_counts (
-            database_name TEXT PRIMARY KEY,
-            schema_text TEXT,
-            counts_json TEXT,
-            computed_at TEXT,
-            row_count INTEGER,
-            table_count INTEGER
-        )
-    """)
-    
-    conn.commit()
-    conn.close()
-    print(f"📊 Schema counts cache database initialized: {SCHEMA_CACHE_DB}")
-
-# Initialize on startup
-try:
-    init_schema_cache_db()
-except Exception as e:
-    print(f"⚠️ Failed to initialize schema cache DB: {e}")
-
-def manage_schema_cache(database_name: str, schema_text: str = None, counts: dict = None, max_age_hours: int = 24):
-    """Manage schema counts cache - save or load based on parameters provided"""
-    try:
-        import json
-        from datetime import timedelta
-        
-        conn = sqlite3.connect(SCHEMA_CACHE_DB)
-        cursor = conn.cursor()
-        
-        if schema_text is not None and counts is not None:
-            # Save mode
-            total_rows = sum(counts.get('tables', {}).values())
-            table_count = len(counts.get('tables', {}))
-        
-            cursor.execute("""
-                INSERT OR REPLACE INTO schema_counts 
-                (database_name, schema_text, counts_json, computed_at, row_count, table_count)
-                VALUES (?, ?, ?, ?, ?, ?)
-            """, (
-                database_name,
-                schema_text[:5000],  # Store first 5000 chars of schema
-                json.dumps(counts),
-                datetime.now().isoformat(),
-                total_rows,
-                table_count
-            ))
-            
-            conn.commit()
-            conn.close()
-            print(f"💾 Saved counts to persistent cache for {database_name} ({total_rows:,} rows, {table_count} tables)")
-            return True
-            
-        else:
-            # Load mode
-            cursor.execute("""
-                SELECT counts_json, computed_at, row_count, table_count
-                FROM schema_counts
-                WHERE database_name = ?
-            """, (database_name,))
-            
-            row = cursor.fetchone()
-            conn.close()
-            
-        if not row:
-            return None
-        
-        counts_json, computed_at_str, total_rows, table_count = row
-        computed_at = datetime.fromisoformat(computed_at_str)
-        age = datetime.now() - computed_at
-        
-        # Check if cache is still fresh
-        if age > timedelta(hours=max_age_hours):
-            print(f"⏰ Persistent cache expired for {database_name} (age: {age.total_seconds()/3600:.1f}h)")
-            return None
-        
-        counts = json.loads(counts_json)
-        print(f"📦 Loaded counts from persistent cache for {database_name} (age: {age.total_seconds()/60:.1f}m, {total_rows:,} rows)")
-        return counts
-        
-    except Exception as e:
-        print(f"⚠️ Failed to manage persistent cache: {e}")
-        return None
-
-def get_table_and_column_counts(database_name: str, use_cache: bool = True) -> dict:
+def get_table_and_column_counts(database_name: str) -> dict:
     """Return table row counts for available collections (API-based).
     
     Note: Fetches counts by running COUNT(*) queries for each collection.
     """
     try:
-        # Fetch schema to get list of collections
-        schema = fetch_schema_from_api()
+        # Use hardcoded schema to get list of collections
+        schema = get_hardcoded_schema()
         collections = schema.get("collections", [])
         
         table_counts = {}
@@ -2154,8 +2282,7 @@ def run_query(query, database_name="zigment", return_columns=False):
     """Execute NoQL query via API, optionally returning column names"""
     try:
         # Normalize LLM output: strip markdown fences and enforce safe LIMIT
-        cleaned_query = _strip_sql_fences(str(query))
-        cleaned_query = ensure_limit(cleaned_query, 50)
+        cleaned_query = normalize_query(str(query), 50)
         
         # Execute via API
         result = execute_noql_query(cleaned_query)
@@ -2262,59 +2389,6 @@ def run_query(query, database_name="zigment", return_columns=False):
             raise e
         else:
             return [], []
-# ===== Data Validation and Guardrails =====
-
-def validate_sql_result(data, columns, query_type="general"):
-    """Validate SQL query results and return validation status"""
-    if not data:
-        return {
-            "valid": False,
-            "error": "No data returned from query",
-            "suggestion": "Try a different question or check if the data exists"
-        }
-    
-    if not columns:
-        return {
-            "valid": False,
-            "error": "No column information available",
-            "suggestion": "Query may have failed to execute properly"
-        }
-    
-    # Check for meaningful data (not just empty rows)
-    meaningful_rows = 0
-    for row in data:
-        if any(cell is not None and str(cell).strip() != "" for cell in row):
-            meaningful_rows += 1
-    
-    if meaningful_rows == 0:
-        return {
-            "valid": False,
-            "error": "Query returned empty or null data",
-            "suggestion": "Try a different question or check your criteria"
-        }
-    
-    # ⚠️ CRITICAL: Reject single data point (useless for charts)
-    if meaningful_rows == 1:
-        return {
-            "valid": False,
-            "error": "Only one data point returned - not enough for visualization",
-            "suggestion": "Try asking for a comparison, trend, or distribution instead of a single value"
-        }
-    
-    # Check for reasonable data size
-    if len(data) > 10000:
-        return {
-            "valid": False,
-            "error": f"Query returned too much data ({len(data)} rows)",
-            "suggestion": "Please be more specific in your question"
-        }
-    
-    return {
-        "valid": True,
-        "row_count": len(data),
-        "meaningful_rows": meaningful_rows,
-        "columns": len(columns)
-    }
 
 def check_question_relevance(question: str, database_name: str) -> dict:
     """Check if the question is relevant to the database schema"""
@@ -2327,7 +2401,7 @@ def check_question_relevance(question: str, database_name: str) -> dict:
     
     # Get basic schema info
     try:
-        schema = get_schema(database_name)
+        schema = _SCHEMA_JSON
         if not schema:
             return {
                 "relevant": False,
@@ -2387,6 +2461,114 @@ def create_no_data_response(question: str) -> dict:
         "charts": []
     }
 
+# Shared query execution helper
+def execute_noql_question(question: str, database_name: str, output_format: str = "table", debug: bool = False) -> dict:
+    """
+    Shared function to execute a NoQL query for a question.
+    
+    Args:
+        question: The user's question
+        database_name: Database to query
+        output_format: "table" or "chart" (affects return structure)
+        debug: If True, print debug information
+    
+    Returns:
+        dict with query results or error response
+    """
+    # Step 1: Check question relevance
+    relevance_check = check_question_relevance(question, database_name)
+    if not relevance_check["relevant"]:
+        return create_error_response(
+            "irrelevant_question", 
+            relevance_check["error"], 
+            relevance_check["suggestion"]
+        )
+    
+    try:
+        # Step 2: Generate query
+        noql_chain = create_anydb_sql_chain(database_name)
+        query = noql_chain.invoke({"question": question})
+        query = normalize_query(query, 50)
+        
+        if debug:
+            print(f"\n🔍 === QUERY EXECUTION ===")
+            print(f"🎯 Question: {question}")
+            print(f"🗄️ Database: {database_name}")
+            print(f"📝 Generated NoQL Query: {query}")
+        
+        # Step 3: Execute query
+        try:
+            rows, columns = run_query(query, database_name, return_columns=True)
+        except Exception as e:
+            if debug:
+                print(f"❌ Query execution failed: {e}")
+            return create_error_response(
+                "query_execution_error",
+                f"Failed to execute NoQL query: {str(e)}",
+                "Please try rephrasing your question or check if the data exists"
+            )
+        
+        # Step 4: Validate data
+        if not rows or not columns:
+            if debug:
+                print(f"❌ No data returned from query")
+            return create_error_response(
+                "invalid_data",
+                "No data returned from query",
+                "Try a different question or check if the data exists"
+            )
+        
+        if debug:
+            print(f"📋 Query Columns: {columns}")
+            print(f"📊 Query Result Rows: {len(rows) if rows else 0}")
+            if rows and len(rows) > 0:
+                print(f"🔍 First few rows:")
+                for i, row in enumerate(rows[:3]):
+                    print(f"   Row {i+1}: {row}")
+                if len(rows) > 3:
+                    print(f"   ... and {len(rows) - 3} more rows")
+            print(f"🔚 === END QUERY EXECUTION ===\n")
+        
+        # Step 5: Format data
+        chart_type = "table" if output_format == "table" else "bar"
+        formatted_data = format_data_for_chart_type(rows, chart_type, question, columns)
+        
+        if not formatted_data or len(formatted_data) == 0:
+            if debug:
+                print("❌ No meaningful data after formatting")
+            return create_no_data_response(question)
+        
+        # Step 6: Return result based on format
+        if output_format == "table":
+            return {
+                "success": True,
+                "query": query, 
+                "columns": columns, 
+                "rows": rows, 
+                "data": formatted_data
+            }
+        else:  # chart format
+            title = f"Analysis: {question[:50]}..."
+            x_axis, y_axis = generate_axis_labels(chart_type, columns, question, title)
+            return {
+                "title": title,
+                "x_axis": x_axis,
+                "y_axis": y_axis,
+                "chart_type": chart_type,
+                "data": formatted_data
+            }
+            
+    except Exception as e:
+        if debug:
+            print(f"❌ Error in execute_noql_question: {e}")
+            import traceback
+            traceback.print_exc()
+        return create_error_response(
+            "processing_error" if output_format == "table" else "chart_generation_error",
+            f"An unexpected error occurred: {str(e)}",
+            "Please try rephrasing your question or check if the data exists"
+        )
+
 # ===== Any-DB dynamic introspection and universal prompt =====
 
 def sample_database_tables(database_name: str, max_rows: int = 3, max_tables: int = 10) -> dict:
@@ -2395,8 +2577,8 @@ def sample_database_tables(database_name: str, max_rows: int = 3, max_tables: in
     Note: Fetches sample rows by running SELECT * LIMIT queries for each collection.
     """
     try:
-        # Fetch schema to get list of collections
-        schema = fetch_schema_from_api()
+        # Use hardcoded schema to get list of collections
+        schema = get_hardcoded_schema()
         collections = schema.get("collections", [])
         
         samples = {}
@@ -2435,9 +2617,51 @@ def sample_database_tables(database_name: str, max_rows: int = 3, max_tables: in
 # Generic, database-agnostic SQL generation prompt
 anydb_sql_prompt = ChatPromptTemplate.from_template(
     """
+🚨🚨🚨 **CRITICAL BLOCKING RULES - READ FIRST!** 🚨🚨🚨
+
+❌ **ABSOLUTELY FORBIDDEN - USING THESE WILL CAUSE IMMEDIATE FAILURE:**
+- UNIX_TIMESTAMP() - DOES NOT EXIST IN NoQL!
+- DATE_SUB() - DOES NOT EXIST IN NoQL!
+- CURRENT_DATE() - DOES NOT EXIST IN NoQL!
+- NOW() - DOES NOT EXIST IN NoQL!
+- INTERVAL - DOES NOT EXIST IN NoQL!
+- HOUR() - DOES NOT EXIST IN NoQL!
+
+✅ **ONLY USE THESE FOR DATE FILTERING:**
+- WHERE timestamp >= 1704067200 (numeric Unix timestamp)
+- WHERE created_at_timestamp >= 1710000000 (numeric Unix timestamp)
+
+🚨 **IF YOU USE ANY FORBIDDEN FUNCTION, THE QUERY WILL FAIL WITH INVALID_QUERY ERROR!**
+
 You are an expert NoQL query generator.
 You will be given a database SCHEMA (tables and columns), TABLE/ COLUMN COUNTS, and small SAMPLES (first rows per table).
 Write ONE NoQL query that answers the QUESTION using only the available tables/columns.
+
+🚨 **CRITICAL: THESE MySQL FUNCTIONS DO NOT EXIST IN NoQL - USING THEM WILL CAUSE INVALID_QUERY ERROR:**
+❌ UNIX_TIMESTAMP(), DATE_SUB(), CURRENT_DATE(), NOW(), INTERVAL, DATE_ADD()
+❌ FROM_UNIXTIME(), DAYOFWEEK(), DATE_FORMAT(), HOUR(), MINUTE(), SECOND()
+❌ **NEVER USE**: `UNIX_TIMESTAMP(DATE_SUB(CURRENT_DATE, INTERVAL 6 MONTH))` - THIS WILL FAIL!
+❌ **NEVER USE**: `WHERE timestamp > UNIX_TIMESTAMP(...)` - THIS WILL FAIL!
+✅ **USE**: `WHERE timestamp >= 1704067200` (numeric Unix timestamp in seconds)
+
+📅 **FOR "LAST 6 MONTHS" QUERIES - USE THIS EXACT PATTERN:**
+```sql
+SELECT 
+  CASE MONTH(TO_DATE(created_at_timestamp * 1000))
+    WHEN 1 THEN 'January' WHEN 2 THEN 'February' WHEN 3 THEN 'March'
+    WHEN 4 THEN 'April' WHEN 5 THEN 'May' WHEN 6 THEN 'June'
+    WHEN 7 THEN 'July' WHEN 8 THEN 'August' WHEN 9 THEN 'September'
+    WHEN 10 THEN 'October' WHEN 11 THEN 'November' WHEN 12 THEN 'December'
+  END AS month,
+  COUNT(*) AS count
+FROM contacts
+WHERE created_at_timestamp >= 1704067200  -- Jan 1, 2024 (6 months ago)
+GROUP BY MONTH(TO_DATE(created_at_timestamp * 1000))
+ORDER BY MONTH(TO_DATE(created_at_timestamp * 1000))
+```
+- **NEVER** use `UNIX_TIMESTAMP(DATE_SUB(CURRENT_DATE, INTERVAL 6 MONTH))`
+- **ALWAYS** use numeric timestamps like `1704067200`
+- **ALWAYS** use CASE statement for month names
 
 **CRITICAL: ACTUAL COLLECTION NAMES (USE THESE IN YOUR QUERY)**
 The schema shows uppercase names, but you MUST use these EXACT lowercase collection names in your queries:
@@ -2452,8 +2676,46 @@ The schema shows uppercase names, but you MUST use these EXACT lowercase collect
 - ORG_AGENT → orgagent
 - ORGANIZATION → organization
 Example: If schema shows "CONTACT" or "CONTACTS", you MUST write "contacts" in your query.
-**CRITICAL: DATE/TIME HANDLING IN NOQL**
-❌ NEVER use MySQL: UNIX_TIMESTAMP(), DATE_SUB(), NOW(), FROM_UNIXTIME(), DAYOFWEEK(), etc.
+**CRITICAL: DATE/TIME HANDLING IN NoQL**
+❌ NEVER use MySQL functions - they DO NOT EXIST in NoQL:
+- ❌ UNIX_TIMESTAMP(), DATE_SUB(), NOW(), FROM_UNIXTIME(), DAYOFWEEK()
+- ❌ CURRENT_DATE(), INTERVAL, DATE_SUB(), DATE_ADD() - These are MySQL functions!
+- ❌ **HOUR() - THIS FUNCTION DOES NOT EXIST! Use EXTRACT(hour FROM ...) instead!**
+- ❌ MINUTE(), SECOND() - Use EXTRACT instead
+
+🚨 **FORBIDDEN MySQL Date Functions (will cause INVALID_QUERY error):**
+- ❌ `UNIX_TIMESTAMP(DATE_SUB(CURRENT_DATE(), INTERVAL 6 MONTH))` - WRONG!
+- ❌ `WHERE created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)` - WRONG!
+- ❌ `WHERE timestamp >= UNIX_TIMESTAMP('2024-01-01')` - WRONG!
+
+✅ **CORRECT NoQL Date Filtering:**
+- ✅ `WHERE created_at_timestamp >= 1704067200` (Unix timestamp in seconds)
+- ✅ `WHERE TO_DATE(timestamp * 1000) >= TO_DATE('2024-01-01')` (date comparison)
+- ✅ For last 6 months: Calculate Unix timestamp manually or use date ranges
+
+🚨 **SPECIFIC EXAMPLES FOR COMMON DATE FILTERS:**
+- ❌ **WRONG**: `WHERE created_at_timestamp >= UNIX_TIMESTAMP(DATE_SUB(CURRENT_DATE(), INTERVAL 6 MONTH))`
+- ✅ **CORRECT**: `WHERE created_at_timestamp >= 1704067200` (Jan 1, 2024 = 1704067200)
+- ✅ **CORRECT**: `WHERE created_at_timestamp >= 1726444800` (Sept 15, 2024 = 1726444800)
+- ✅ **CORRECT**: `WHERE TO_DATE(created_at_timestamp * 1000) >= TO_DATE('2024-01-01')`
+
+📅 **MONTHLY QUERIES WITH PROPER FILTERING:**
+```sql
+-- ✅ CORRECT: Monthly data with date filter and month names
+SELECT 
+  CASE MONTH(TO_DATE(created_at_timestamp * 1000))
+    WHEN 1 THEN 'January' WHEN 2 THEN 'February' WHEN 3 THEN 'March'
+    WHEN 4 THEN 'April' WHEN 5 THEN 'May' WHEN 6 THEN 'June'
+    WHEN 7 THEN 'July' WHEN 8 THEN 'August' WHEN 9 THEN 'September'
+    WHEN 10 THEN 'October' WHEN 11 THEN 'November' WHEN 12 THEN 'December'
+  END AS month,
+  COUNT(*) AS count
+FROM contacts
+WHERE created_at_timestamp >= 1704067200  -- Jan 1, 2024
+GROUP BY MONTH(TO_DATE(created_at_timestamp * 1000))
+ORDER BY MONTH(TO_DATE(created_at_timestamp * 1000))
+```
+
 🎯 **Unix Timestamp Conversion (stored as SECONDS):**
 For fields like `timestamp`, `created_at`, `updated_at`, `created_at_timestamp`:
 - **MUST convert**: `TO_DATE(field * 1000)` before using date functions
@@ -2461,15 +2723,103 @@ For fields like `timestamp`, `created_at`, `updated_at`, `created_at_timestamp`:
 - Example: `SELECT DATE_TRUNC(TO_DATE(created_at * 1000), 'day') FROM contacts`
 
 ✅ NoQL Date Functions (after TO_DATE conversion):
-- `DAY_OF_WEEK(TO_DATE(timestamp * 1000))` ← **BEST for day of week analysis**
-- `MONTH(TO_DATE(field * 1000))`, `YEAR(TO_DATE(field * 1000))`
-- `DATE_TRUNC(TO_DATE(field * 1000), 'day'|'month'|'year')`
+- `DAY_OF_WEEK(TO_DATE(timestamp * 1000))` ← **For day of week (1-7)**
+- `MONTH(TO_DATE(field * 1000))`, `YEAR(TO_DATE(field * 1000))` ← **For month/year numbers**
+- `DATE_TRUNC(TO_DATE(field * 1000), 'day'|'month'|'year')` ← **For date truncation**
+- **`HOUR(TO_DATE(field * 1000))`** ← **MANDATORY for hour extraction (0-23)**
+- **`EXTRACT(minute FROM TO_DATE(field * 1000))`** ← **For minute extraction**
+- **`EXTRACT(second FROM TO_DATE(field * 1000))`** ← **For second extraction**
 - ⚠️ Avoid `EXTRACT(dow ...)` on converted timestamps - use `DAY_OF_WEEK()` instead
+
+🚨 **CRITICAL - HOUR EXTRACTION:**
+- ❌ **WRONG**: `EXTRACT(hour FROM TO_DATE(timestamp * 1000))` - EXTRACT() function DOES NOT EXIST!
+- ✅ **CORRECT**: `HOUR(TO_DATE(timestamp * 1000))` - This is the ONLY way!
+
+📅 **CRITICAL - MONTH NAMES FOR CHARTS:**
+- When grouping by month for charts/visualization, ALWAYS convert month numbers to month names
+- ❌ **WRONG**: `SELECT MONTH(TO_DATE(timestamp * 1000)) AS month, COUNT(*) ...` (returns numbers 1-12)
+- ✅ **CORRECT**: Use CASE statement to convert to month names:
+```sql
+SELECT 
+  CASE MONTH(TO_DATE(timestamp * 1000))
+    WHEN 1 THEN 'January' WHEN 2 THEN 'February' WHEN 3 THEN 'March'
+    WHEN 4 THEN 'April' WHEN 5 THEN 'May' WHEN 6 THEN 'June'
+    WHEN 7 THEN 'July' WHEN 8 THEN 'August' WHEN 9 THEN 'September'
+    WHEN 10 THEN 'October' WHEN 11 THEN 'November' WHEN 12 THEN 'December'
+  END AS month,
+  COUNT(*) AS count
+FROM events
+GROUP BY MONTH(TO_DATE(timestamp * 1000))
+ORDER BY MONTH(TO_DATE(timestamp * 1000))
+```
+- **Why**: Charts with "1, 2, 3..." are confusing; "January, February, March..." is much clearer
+- **Always do this** for any chart question involving months (monthly trends, data by month, etc.)
 
 ⚡ For filtering only (faster without conversion):
 - `WHERE timestamp >= 1710374400` (numeric comparison)
 
 NoQL Query Rules:
+
+🚨 **CRITICAL: MONTHLY CHARTS MUST USE MONTH NAMES!**
+- **NEVER** return month numbers (1, 2, 3) for charts - users can't understand them!
+- **ALWAYS** use CASE statement to convert to month names (January, February, March...)
+- **MANDATORY** for any question containing "month", "monthly", "per month"
+
+**📌 MOST COMMON MISTAKES TO AVOID:**
+1. ❌ Using month numbers (1-12) instead of month names in charts - ALWAYS use CASE statement for month names!
+2. ❌ Using `HOUR(date)` - Does NOT exist! Use `EXTRACT(hour FROM date)` instead
+3. ❌ Using `MINUTE(date)` or `SECOND(date)` - Use `EXTRACT(minute/second FROM date)`
+4. ❌ Forgetting to convert timestamps: Must use `TO_DATE(timestamp * 1000)` first
+5. ❌ **Using MySQL time functions: UNIX_TIMESTAMP(), DATE_SUB(), CURRENT_DATE(), NOW(), INTERVAL** - NONE of these exist!
+6. ❌ **Using DATE_ADD() in WHERE clauses** - Not supported!
+
+**🎯 MONTHLY DATA QUERIES - MANDATORY PATTERN:**
+When question asks for "per month", "monthly", "by month", or "last N months":
+```sql
+SELECT 
+  CASE MONTH(TO_DATE(created_at_timestamp * 1000))
+    WHEN 1 THEN 'January' WHEN 2 THEN 'February' WHEN 3 THEN 'March'
+    WHEN 4 THEN 'April' WHEN 5 THEN 'May' WHEN 6 THEN 'June'
+    WHEN 7 THEN 'July' WHEN 8 THEN 'August' WHEN 9 THEN 'September'
+    WHEN 10 THEN 'October' WHEN 11 THEN 'November' WHEN 12 THEN 'December'
+  END AS month,
+  COUNT(*) AS count
+FROM contacts
+WHERE created_at_timestamp >= 1696118400  -- Oct 1, 2023 (6 months ago in Unix seconds)
+GROUP BY MONTH(TO_DATE(created_at_timestamp * 1000))
+ORDER BY MONTH(TO_DATE(created_at_timestamp * 1000))
+```
+- **ALWAYS** use CASE statement for month names
+- **NEVER** use UNIX_TIMESTAMP(), DATE_SUB(), INTERVAL, CURRENT_DATE()
+- **USE** numeric timestamps for WHERE filtering
+- **GROUP BY** the numeric month, **ORDER BY** numeric month, but **SELECT** month name!
+
+**🚨 CRITICAL - TIME-BASED FILTERING:**
+- ❌ **WRONG**: `WHERE timestamp >= UNIX_TIMESTAMP(DATE_SUB(CURRENT_DATE(), INTERVAL 6 MONTH))`
+- ❌ **WRONG**: `WHERE created_at >= DATE_SUB(NOW(), INTERVAL 30 DAY)`
+- ✅ **CORRECT**: Just get all data without time filtering: `WHERE created_at_timestamp > 0` or omit WHERE entirely
+- ✅ **OR** Use fixed numeric timestamps if you must filter: `WHERE timestamp >= 1700000000`
+
+**✅ CORRECT Hour Extraction Pattern:**
+```sql
+-- For hourly analysis:
+SELECT HOUR(TO_DATE(timestamp * 1000)) AS hour, COUNT(*) 
+FROM events 
+GROUP BY hour
+
+-- For hourly time ranges (BETTER for charts):
+SELECT 
+  CASE 
+    WHEN HOUR(TO_DATE(timestamp * 1000)) >= 0 AND HOUR(TO_DATE(timestamp * 1000)) <= 2 THEN '0-3'
+    WHEN HOUR(TO_DATE(timestamp * 1000)) >= 3 AND HOUR(TO_DATE(timestamp * 1000)) <= 5 THEN '3-6'
+    -- ... etc
+  END AS time_range,
+  COUNT(*) 
+FROM events 
+GROUP BY time_range
+```
+
+**General Rules:**
 - **Keep it simple:** Group by ONE dimension only; avoid multi-column grouping unless absolutely necessary
 - **Avoid unnecessary JOINs:** If a field exists in the main table, don't join just to get the same field
   * ✅ GOOD: `SELECT t.[field], COUNT(*) FROM [table] t GROUP BY t.[field]`
@@ -2507,106 +2857,46 @@ QUESTION: {question}
 )
 
 def create_anydb_sql_chain(database_name: str):
-    def _invoke(payload):
-        question = payload["question"]
-        schema_str = get_schema(database_name)
-        llm = ChatOpenAI(model_name="gpt-3.5-turbo")
-        formatted_prompt = NOQL_DIRECT_PROMPT.format(schema=schema_str, question=question)
-        result = llm.invoke(formatted_prompt)
-        return result.text.strip()
-    class DummyChain:
+    """Generate NoQL query from question using LLM"""
+    schema_str = _SCHEMA_JSON
+    llm = ChatOpenAI(model_name="gpt-3.5-turbo")
+    
+    class NoQLChain:
         def invoke(self, payload):
-            return _invoke(payload)
-    return DummyChain()
-
-def validate_sql_against_schema(query: str, database_name: str) -> dict:
-    """
-    Validate SQL query against database schema (API-based - validation happens server-side).
-    Returns {"valid": bool, "error": str, "corrected_query": str}
-    """
-    # In API-based mode, validation happens server-side
-    print(f"ℹ️ API-based mode: Schema validation skipped (handled by server)")
-    return {
-        "valid": True,
-        "error": None,
-        "corrected_query": None
-    }
+            question = payload["question"]
+            formatted_prompt = NOQL_DIRECT_PROMPT.format(schema=schema_str, question=question)
+            result = llm.invoke(formatted_prompt)
+            return result.text.strip()
+    
+    return NoQLChain()
 
 def answer_anydb_question(question: str, database_name: str):
-    """Answer question with strict validation and guardrails"""
-    
-    # Step 1: Check question relevance
-    relevance_check = check_question_relevance(question, database_name)
-    if not relevance_check["relevant"]:
-        return create_error_response(
-            "irrelevant_question", 
-            relevance_check["error"], 
-            relevance_check["suggestion"]
-        )
-    
-    try:
-        # Step 2: Generate SQL query
-        chain = create_anydb_sql_chain(database_name)
-        query = chain.invoke({"question": question})
-        query = _strip_sql_fences(query)
-        query = ensure_limit(query, 50)
-        
-        # Step 3: Execute query with error handling
-        try:
-            rows, columns = run_query(query, database_name, return_columns=True)
-        except Exception as e:
-            return create_error_response(
-                "sql_execution_error",
-                f"Failed to execute SQL query: {str(e)}",
-                "Please try rephrasing your question or check if the data exists"
-            )
-        
-        # Step 4: Validate query results
-        validation = validate_sql_result(rows, columns)
-        if not validation["valid"]:
-            return create_error_response(
-                "invalid_data",
-                validation["error"],
-                validation["suggestion"]
-            )
-        
-        # Step 5: Format data for presentation
-        try:
-            formatted = format_data_for_chart_type(rows, "table", question, columns)
-        except Exception as e:
-            return create_error_response(
-                "data_formatting_error",
-                f"Failed to format data: {str(e)}",
-                "The query returned data but it couldn't be formatted for display"
-            )
-        
-        # Step 6: Final validation - ensure we have meaningful formatted data
-        if not formatted or len(formatted) == 0:
-            return create_no_data_response(question)
-        
-        return {
-            "success": True,
-            "sql": query, 
-            "columns": columns, 
-            "rows": rows, 
-            "data": formatted,
-            "validation": validation
-        }
-        
-    except Exception as e:
-        return create_error_response(
-            "processing_error",
-            f"An unexpected error occurred: {str(e)}",
-            "Please try again or contact support if the issue persists"
-        )
+    """Answer question and return table-formatted data"""
+    return execute_noql_question(question, database_name, output_format="table", debug=False)
 
 
-# SQL prompt template
-sql_prompt = ChatPromptTemplate.from_template(
+# NoQL prompt template
+noql_prompt = ChatPromptTemplate.from_template(
     """
+🚨🚨🚨 **CRITICAL BLOCKING RULES - READ FIRST!** 🚨🚨🚨
+
+❌ **ABSOLUTELY FORBIDDEN - USING THESE WILL CAUSE IMMEDIATE FAILURE:**
+- UNIX_TIMESTAMP() - DOES NOT EXIST IN NoQL!
+- DATE_SUB() - DOES NOT EXIST IN NoQL!
+- CURRENT_DATE() - DOES NOT EXIST IN NoQL!
+- NOW() - DOES NOT EXIST IN NoQL!
+- INTERVAL - DOES NOT EXIST IN NoQL!
+- HOUR() - DOES NOT EXIST IN NoQL!
+
+✅ **ONLY USE THESE FOR DATE FILTERING:**
+- WHERE timestamp >= 1704067200 (numeric Unix timestamp)
+- WHERE created_at_timestamp >= 1710000000 (numeric Unix timestamp)
+
+🚨 **IF YOU USE ANY FORBIDDEN FUNCTION, THE QUERY WILL FAIL WITH INVALID_QUERY ERROR!**
+
 You are an expert NoQL query generator specializing in advanced analytics and complex query generation.
 Your task is to generate sophisticated, insightful NoQL queries that go beyond simple SELECT statements.
-The query should run directly without any extra formatting (no ```sql ...``` blocks, no explanations).
+The query should run directly without any extra formatting (no ```noql ...``` blocks, no explanations).
 
 **CRITICAL: ACTUAL COLLECTION NAMES (USE THESE IN YOUR QUERY)**
 The schema shows uppercase names, but you MUST use these EXACT lowercase collection names in your queries:
@@ -2625,15 +2915,31 @@ The schema shows uppercase names, but you MUST use these EXACT lowercase collect
 Example: If schema shows "CONTACT" or "CONTACTS", you MUST write "contacts" in your query.
 Always use lowercase collection names as specified above.
 
-**CRITICAL: DATE/TIME HANDLING IN NOQL**
-Many timestamp fields are stored as Unix epoch seconds (numbers). For date filtering:
-- ❌ NEVER use: UNIX_TIMESTAMP(), DATE_SUB(), NOW(), INTERVAL, FROM_UNIXTIME(), DATE_FORMAT()
-- ✅ Instead use direct numeric comparison with pre-calculated Unix timestamps:
-  - Last 6 months: WHERE timestamp_field >= 1710374400 (calculate: current_time - 6*30*24*3600)
-  - Last 30 days: WHERE timestamp_field >= 1726444800 (calculate: current_time - 30*24*3600)
-  - Specific date: WHERE timestamp_field >= 1704067200 (Jan 1, 2024 = 1704067200)
-- For current time reference: Use a recent timestamp like 1729000000 (Oct 2024)
-- Example: `WHERE created_at_timestamp >= 1710000000` NOT `WHERE created_at_timestamp >= UNIX_TIMESTAMP(DATE_SUB(NOW(), INTERVAL 6 MONTH))`
+🚨 **CRITICAL: THESE MySQL FUNCTIONS DO NOT EXIST IN NoQL - USING THEM WILL CAUSE INVALID_QUERY ERROR:**
+❌ UNIX_TIMESTAMP(), DATE_SUB(), CURRENT_DATE(), NOW(), INTERVAL, DATE_ADD()
+❌ FROM_UNIXTIME(), DAYOFWEEK(), DATE_FORMAT(), HOUR(), MINUTE(), SECOND()
+❌ **NEVER USE**: `UNIX_TIMESTAMP(DATE_SUB(NOW(), INTERVAL 6 MONTH))` - THIS WILL FAIL!
+❌ **NEVER USE**: `WHERE timestamp > UNIX_TIMESTAMP(...)` - THIS WILL FAIL!
+✅ **USE**: `WHERE timestamp >= 1704067200` (numeric Unix timestamp in seconds)
+
+📅 **FOR "LAST 6 MONTHS" QUERIES - USE THIS EXACT PATTERN:**
+```sql
+SELECT 
+  CASE MONTH(TO_DATE(created_at_timestamp * 1000))
+    WHEN 1 THEN 'January' WHEN 2 THEN 'February' WHEN 3 THEN 'March'
+    WHEN 4 THEN 'April' WHEN 5 THEN 'May' WHEN 6 THEN 'June'
+    WHEN 7 THEN 'July' WHEN 8 THEN 'August' WHEN 9 THEN 'September'
+    WHEN 10 THEN 'October' WHEN 11 THEN 'November' WHEN 12 THEN 'December'
+  END AS month,
+  COUNT(*) AS count
+FROM contacts
+WHERE created_at_timestamp >= 1704067200  -- Jan 1, 2024 (6 months ago)
+GROUP BY MONTH(TO_DATE(created_at_timestamp * 1000))
+ORDER BY MONTH(TO_DATE(created_at_timestamp * 1000))
+```
+- **NEVER** use `UNIX_TIMESTAMP(DATE_SUB(NOW(), INTERVAL 6 MONTH))`
+- **ALWAYS** use numeric timestamps like `1704067200`
+- **ALWAYS** use CASE statement for month names
 
 🎯 **PRIORITY: Generate Complex, Analytical Queries**
 - Favor window functions, subqueries, and advanced SQL features over simple SELECT statements
@@ -2657,10 +2963,528 @@ Many timestamp fields are stored as Unix epoch seconds (numbers). For date filte
 - Prefer EXISTS over IN for subqueries
 - Use CTEs to break down complex logic
 - Apply early filtering to reduce data processing
-- Choose appropriate operators and data type comparisons
+**ADVANCED NoQL EXAMPLES WITH COMPLEX PATTERNS:**
+
+Q: "Distribution of leads by ad source"
+A: SELECT CASE WHEN meta_ad_data_synced = true THEN 'Meta/Facebook' WHEN google_ad_data_synced = true THEN 'Google' ELSE 'Other' END as ad_source, COUNT(*) as count FROM contacts WHERE is_deleted = false GROUP BY ad_source ORDER BY count DESC
+
+Q: "Number of contacts who has replied to an agent in the last 30 days"
+A: SELECT 
+      'Last 30 Days' AS period,
+      COUNT(*) AS responded_contacts
+    FROM chathistories
+    WHERE is_deleted = false
+      AND first_response_received = true
+      AND created_at_timestamp >= SUBTRACT(
+            DIVIDE(TO_LONG(CURRENT_DATE()), 1000),
+            MULTIPLY(30, 86400)
+          )
+
+    UNION ALL
+
+    SELECT 
+      '30-60 Days' AS period,
+      COUNT(*) AS responded_contacts
+    FROM chathistories
+    WHERE is_deleted = false
+      AND first_response_received = true
+      AND created_at_timestamp < SUBTRACT(
+            DIVIDE(TO_LONG(CURRENT_DATE()), 1000),
+            MULTIPLY(30, 86400)
+          )
+      AND created_at_timestamp >= SUBTRACT(
+            DIVIDE(TO_LONG(CURRENT_DATE()), 1000),
+            MULTIPLY(60, 86400)
+          )
+
+Q: "Month-wise breakdown of key metrics over the last 12 months"
+A: SELECT 
+      DATE_TO_STRING(
+        DATE_TRUNC(TO_DATE(created_at_timestamp * 1000), 'month'),
+        '%b %Y',
+        'UTC'
+      ) AS month,
+      COUNT(*) AS total_leads,
+      SUM(CASE WHEN status = 'CONVERTED' THEN 1 ELSE 0 END) AS converted_leads,
+      SUM(CASE WHEN first_response_received = true THEN 1 ELSE 0 END) AS responded_leads,
+      DIVIDE(
+        TO_LONG(DATE_TRUNC(TO_DATE(created_at_timestamp * 1000), 'month')),
+        1000
+      ) AS month_start
+    FROM contacts 
+    WHERE is_deleted = false 
+      AND created_at_timestamp >= SUBTRACT(
+            DIVIDE(TO_LONG(CURRENT_DATE()), 1000), 
+            MULTIPLY(365, 86400)
+          )
+    GROUP BY 
+      DATE_TO_STRING(DATE_TRUNC(TO_DATE(created_at_timestamp * 1000), 'month'), '%b %Y', 'UTC'),
+      DIVIDE(TO_LONG(DATE_TRUNC(TO_DATE(created_at_timestamp * 1000), 'month')), 1000)
+    ORDER BY month_start DESC
+
+a) Q: "Day-wise breakdown of message activity"
+A: SELECT 
+    DIVIDE(TO_LONG(DATE_TRUNC(TO_DATE(created_at_timestamp * 1000), 'day')), 1000) AS date,
+    COUNT(*) AS chat_sessions,
+    SUM(total_messages) AS total_messages,
+    AVG(total_messages) AS avg_messages_per_session
+    FROM chathistories 
+    WHERE is_deleted = false 
+    AND created_at_timestamp >= SUBTRACT(
+      DIVIDE(TO_LONG(CURRENT_DATE()), 1000), 
+      MULTIPLY(30, 86400)
+    )
+    GROUP BY DIVIDE(TO_LONG(DATE_TRUNC(TO_DATE(created_at_timestamp * 1000), 'day')), 1000)
+    ORDER BY date
+
+b) Q: "Daily breakdown of leads through the conversion funnel"
+A: SELECT 
+      DIVIDE(TO_LONG(DATE_TRUNC(TO_DATE(created_at_timestamp * 1000), 'day')), 1000) AS date,
+      COUNT(*) AS total_leads,
+      SUM(CASE WHEN contact_stage = 'LEAD' THEN 1 ELSE 0 END) AS leads,
+      SUM(CASE WHEN contact_stage = 'QUALIFIED' THEN 1 ELSE 0 END) AS qualified,
+      SUM(CASE WHEN contact_stage = 'PROPOSAL' THEN 1 ELSE 0 END) AS proposals,
+      SUM(CASE WHEN contact_stage = 'CONVERTED' THEN 1 ELSE 0 END) AS converted,
+      DIVIDE(SUM(CASE WHEN contact_stage = 'CONVERTED' THEN 1 ELSE 0 END), COUNT(*)) AS conversion_rate
+    FROM contacts 
+    WHERE is_deleted = false 
+    AND created_at_timestamp >= SUBTRACT(
+      DIVIDE(TO_LONG(CURRENT_DATE()), 1000), 
+      MULTIPLY(30, 86400)
+    )
+    GROUP BY DIVIDE(TO_LONG(DATE_TRUNC(TO_DATE(created_at_timestamp * 1000), 'day')), 1000)
+    ORDER BY date
+
+c) Q: "Distribution of contacts by timezone"
+A: SELECT timezone, COUNT(*) as count FROM contacts WHERE is_deleted = false GROUP BY timezone ORDER BY count DESC LIMIT 10
+
+d) Q: "Distribution of meetings by status"
+A: SELECT type as meeting_status, COUNT(*) as count FROM events WHERE is_deleted = false
+    AND type IN ('MEETING_SCHEDULED', 'MEETING_ATTENDED', 'MEETING_CANCELLED', 'MEETING_RESCHEDULED')
+    GROUP BY type ORDER BY count DESC
+
+e) Q: "Distribution of contacts by tags"
+A: SELECT label, COUNT(*) AS count FROM contacttags WHERE label IS NOT NULL AND label != '' GROUP BY label ORDER BY count DESC, label ASC LIMIT 20
+
+f) Q: "Distribution of contacts by lifecycle stage"
+A: SELECT
+      lifecycle_stage,
+      COUNT(*) AS total_contacts
+      FROM corecontacts
+      WHERE lifecycle_stage IS NOT NULL
+      and is_deleted = false
+      and lifecycle_stage != 'NONE' 
+      GROUP BY lifecycle_stage
+      ORDER BY total_contacts DESC
+
+g) Q: "Week-wise breakdown of new leads over the last 8 weeks"
+A: SELECT 
+      DATE_TO_STRING(
+        DATE_TRUNC(TO_DATE(created_at_timestamp * 1000), 'week'),
+        '%b %d, %Y',
+        'UTC'
+      ) AS week_label,
+      DIVIDE(TO_LONG(DATE_TRUNC(TO_DATE(created_at_timestamp * 1000), 'week')), 1000) AS week_start,
+      COUNT(*) AS total_leads,
+      SUM(CASE WHEN status = 'IN_PROGRESS' THEN 1 ELSE 0 END) AS in_progress_leads,
+      SUM(CASE WHEN status = 'CONVERTED' THEN 1 ELSE 0 END) AS converted_leads,
+      SUM(CASE WHEN status = 'NOT_QUALIFIED' THEN 1 ELSE 0 END) AS not_qualified_leads
+    FROM contacts 
+    WHERE is_deleted = false 
+      AND created_at_timestamp >= SUBTRACT(
+            DIVIDE(TO_LONG(CURRENT_DATE()), 1000), 
+            MULTIPLY(56, 86400)
+          )
+    GROUP BY 
+      DATE_TO_STRING(DATE_TRUNC(TO_DATE(created_at_timestamp * 1000), 'week'), '%b %d, %Y', 'UTC'),
+      DIVIDE(TO_LONG(DATE_TRUNC(TO_DATE(created_at_timestamp * 1000), 'week')), 1000)
+    ORDER BY week_start
+
+h) Q: "Contacts grouped by message engagement"
+A: SELECT CASE WHEN total_messages = 0 THEN 'No Messages' WHEN total_messages <= 5 THEN 'Low (1-5)' WHEN total_messages <= 20 THEN 'Medium (6-20)' WHEN total_messages <= 50 THEN 'High (21-50)' ELSE 'Very High (50+)' END as engagement_level, COUNT(*) as count FROM contacts WHERE is_deleted = false GROUP BY engagement_level ORDER BY MIN(total_messages)
+
+i) Q: "Comparison of activity between weekends and weekdays"
+A: SELECT 
+    CASE 
+      WHEN DAY_OF_WEEK(TO_DATE(created_at_timestamp * 1000)) IN (1, 7) THEN 'Weekend'
+      ELSE 'Weekday'
+    END as day_type,
+    COUNT(*) as total_leads,
+    SUM(CASE WHEN status = 'CONVERTED' THEN 1 ELSE 0 END) as converted_leads,
+    AVG(total_messages) as avg_messages
+  FROM contacts 
+  WHERE is_deleted = false 
+    AND created_at_timestamp >= SUBTRACT(DIVIDE(TO_LONG(CURRENT_DATE()), 1000), MULTIPLY(30, 86400))
+  GROUP BY CASE 
+    WHEN DAY_OF_WEEK(TO_DATE(created_at_timestamp * 1000)) IN (1, 7) THEN 'Weekend'
+    ELSE 'Weekday'
+  END
+
+j) Q: "Number of leads that have been qualified"
+A: SELECT COUNT(*) AS value, 'Qualified Leads' AS label
+      FROM contacts
+      WHERE is_deleted = false
+      AND status = 'QUALIFIED'
+
+k) Q: "Contacts who have exchanged messages"
+A: SELECT COUNT(*) as contacts_with_messages FROM contacts WHERE is_deleted = false AND total_messages > 0
+
+l) Q: "Contacts with recent message activity"
+A: SELECT COUNT(*) as active_contacts FROM contacts WHERE is_deleted = false AND last_message_timestamp > 0
+
+m) Q: "Count of all messages (Agent + User)"
+A: SELECT 
+      'Last 30 Days' AS period,
+      COUNT(*) AS total_messages
+    FROM chathistorydetailedmessages
+    WHERE created_at_timestamp >= SUBTRACT(
+            DIVIDE(TO_LONG(CURRENT_DATE()), 1000),
+            MULTIPLY(30, 86400)
+          )
+
+    UNION ALL
+
+    SELECT 
+      '30-60 Days' AS period,
+      COUNT(*) AS total_messages
+    FROM chathistorydetailedmessages
+    WHERE created_at_timestamp < SUBTRACT(
+            DIVIDE(TO_LONG(CURRENT_DATE()), 1000),
+            MULTIPLY(30, 86400)
+          )
+      AND created_at_timestamp >= SUBTRACT(
+            DIVIDE(TO_LONG(CURRENT_DATE()), 1000),
+            MULTIPLY(60, 86400)
+          )
+
+n) Q: "Distribution of leads by their source"
+A: SELECT source, COUNT(*) as count FROM contacts WHERE is_deleted = false GROUP BY source ORDER BY count DESC
+
+o) Q: "Distribution of messages by communication channel"
+A: SELECT channel, COUNT(*) as chat_sessions, SUM(total_messages) as total_messages FROM chathistories WHERE is_deleted = false GROUP BY channel ORDER BY total_messages DESC
+
+p) Q: "Messages grouped by communication channels"
+A: SELECT channel, COUNT(*) as chat_sessions, SUM(total_messages) as total_messages FROM chathistories WHERE is_deleted = false GROUP BY channel ORDER BY total_messages DESC
+
+q) Q: "Conversion rates by lead source"
+A: SELECT source, COUNT(*) as total_leads, SUM(CASE WHEN status = 'CONVERTED' THEN 1 ELSE 0 END) as converted_leads FROM contacts WHERE is_deleted = false GROUP BY source ORDER BY total_leads DESC
+
+r) Q: "Current week vs previous week key metrics comparison"
+A: SELECT 
+      'This Week' AS period,
+      COUNT(*) AS total_leads,
+      SUM(CASE WHEN status = 'IN_PROGRESS' THEN 1 ELSE 0 END) AS in_progress_leads,
+      SUM(CASE WHEN status = 'CONVERTED' THEN 1 ELSE 0 END) AS converted_leads,
+      SUM(CASE WHEN first_response_received = true THEN 1 ELSE 0 END) AS responded_leads
+    FROM contacts
+    WHERE is_deleted = false
+      AND created_at_timestamp >= SUBTRACT(
+            DIVIDE(TO_LONG(CURRENT_DATE()), 1000),
+            MULTIPLY(7, 86400)
+          )
+      AND created_at_timestamp < DIVIDE(TO_LONG(CURRENT_DATE()), 1000)
+
+    UNION ALL
+
+    SELECT 
+      'Last Week' AS period,
+      COUNT(*) AS total_leads,
+      SUM(CASE WHEN status = 'IN_PROGRESS' THEN 1 ELSE 0 END) AS in_progress_leads,
+      SUM(CASE WHEN status = 'CONVERTED' THEN 1 ELSE 0 END) AS converted_leads,
+      SUM(CASE WHEN first_response_received = true THEN 1 ELSE 0 END) AS responded_leads
+    FROM contacts
+    WHERE is_deleted = false
+      AND created_at_timestamp >= SUBTRACT(
+            DIVIDE(TO_LONG(CURRENT_DATE()), 1000),
+            MULTIPLY(14, 86400)
+          )
+      AND created_at_timestamp < SUBTRACT(
+            DIVIDE(TO_LONG(CURRENT_DATE()), 1000),
+            MULTIPLY(7, 86400)
+          )
+
+s) Q: "Distribution of leads by their current status"
+A: SELECT status, COUNT(*) as count FROM contacts WHERE is_deleted = false GROUP BY status ORDER BY count DESC
+
+t) Q: "Distribution of leads by their contact stage"
+A: SELECT contact_stage, COUNT(*) as count FROM contacts WHERE is_deleted = false GROUP BY contact_stage ORDER BY count DESC
+
+u) Q: "Day-wise breakdown of new leads over the last 30 days"
+A: SELECT 
+      DIVIDE(TO_LONG(DATE_TRUNC(TO_DATE(created_at_timestamp * 1000), 'day')), 1000) AS date,
+      COUNT(*) AS new_leads
+    FROM contacts 
+    WHERE is_deleted = false 
+      AND created_at_timestamp >= SUBTRACT(
+            DIVIDE(TO_LONG(CURRENT_DATE()), 1000), 
+            MULTIPLY(30, 86400)
+          )
+    GROUP BY DIVIDE(TO_LONG(DATE_TRUNC(TO_DATE(created_at_timestamp * 1000), 'day')), 1000)
+    ORDER BY date
+
+v) Q: "Number of contacts who has replied to an agent in the last 30 days"
+A: SELECT 
+      'Last 30 Days' AS period,
+      COUNT(*) AS responded_contacts
+    FROM chathistories
+    WHERE is_deleted = false
+      AND first_response_received = true
+      AND created_at_timestamp >= SUBTRACT(
+            DIVIDE(TO_LONG(CURRENT_DATE()), 1000),
+            MULTIPLY(30, 86400)
+          )
+
+    UNION ALL
+
+    SELECT 
+      '30-60 Days' AS period,
+      COUNT(*) AS responded_contacts
+    FROM chathistories
+    WHERE is_deleted = false
+      AND first_response_received = true
+      AND created_at_timestamp < SUBTRACT(
+            DIVIDE(TO_LONG(CURRENT_DATE()), 1000),
+            MULTIPLY(30, 86400)
+          )
+      AND created_at_timestamp >= SUBTRACT(
+            DIVIDE(TO_LONG(CURRENT_DATE()), 1000),
+            MULTIPLY(60, 86400)
+          )
+
+w) Q: "Average number of messages per conversation (Last 30 Days)"
+A: SELECT 
+      ROUND(AVG(total_messages)) AS value,
+      'Avg Total Message' AS label
+    FROM contacts
+    WHERE is_deleted = false
+      AND created_at_timestamp >= SUBTRACT(
+            DIVIDE(TO_LONG(CURRENT_DATE()), 1000),
+            MULTIPLY(30, 86400)
+          )
+    GROUP BY NULL
+
+x) Q: "Hour-by-hour breakdown of activity for today"
+A: SELECT 
+    HOUR(TO_DATE(created_at_timestamp * 1000)) as hour,
+    COUNT(*) as new_contacts,
+    SUM(CASE WHEN total_messages > 0 THEN 1 ELSE 0 END) as active_contacts
+  FROM contacts 
+  WHERE is_deleted = false 
+    AND created_at_timestamp >= SUBTRACT(DIVIDE(TO_LONG(CURRENT_DATE()), 1000), MULTIPLY(1, 86400))
+  GROUP BY HOUR(TO_DATE(created_at_timestamp * 1000))
+  ORDER BY hour
+
+y) Q: "Events by contact with contact details"
+A: SELECT 
+    c.name as contact_name,
+    c.email,
+    e.event_type,
+    COUNT(*) as event_count
+  FROM events e
+  JOIN contacts c ON e.contact_id = c._id
+  WHERE e.is_deleted = false
+  GROUP BY c.name, c.email, e.event_type
+  ORDER BY event_count DESC
+
+z) Q: "User activity with user details"
+A: SELECT 
+    u.username,
+    u.first_name,
+    u.last_name,
+    e.event_type,
+    COUNT(*) as activity_count
+  FROM events e
+  JOIN users u ON e.user_id = u._id
+  WHERE e.is_deleted = false
+  GROUP BY u.username, u.first_name, u.last_name, e.event_type
+  ORDER BY activity_count DESC
+
+aa) Q: "Contacts with their organization details"
+A: SELECT 
+    c.name as contact_name,
+    c.email,
+    o.name as organization_name,
+    o.industry,
+    o.size
+  FROM contacts c
+  JOIN organizations o ON c.company = o.name
+  WHERE c.is_deleted = false
+  ORDER BY o.name, c.name
+
+bb) Q: "Events grouped by date and type"
+A: SELECT 
+    DATE_TRUNC(TO_DATE(created_at * 1000), 'day') AS event_date,
+    event_type,
+    COUNT(*) AS event_count
+  FROM events
+  WHERE is_deleted = false
+  GROUP BY DATE_TRUNC(TO_DATE(created_at * 1000), 'day'), event_type
+  ORDER BY event_date, event_count DESC
+
+cc) Q: "Monthly event activity by type"
+A: SELECT 
+    DATE_TRUNC(TO_DATE(created_at * 1000), 'month') AS event_month,
+    event_type,
+    COUNT(*) AS event_count
+  FROM events
+  WHERE is_deleted = false
+  GROUP BY DATE_TRUNC(TO_DATE(created_at * 1000), 'month'), event_type
+  ORDER BY event_month, event_count DESC
+
+dd) Q: "Weekly contact creation trends"
+A: SELECT 
+    DATE_TO_STRING(
+      DATE_TRUNC(TO_DATE(created_at_timestamp * 1000), 'week'),
+      '%b %d, %Y',
+      'UTC'
+    ) AS week_label,
+    DIVIDE(TO_LONG(DATE_TRUNC(TO_DATE(created_at_timestamp * 1000), 'week')), 1000) AS week_start,
+    COUNT(*) AS new_contacts
+  FROM contacts
+  WHERE is_deleted = false
+  GROUP BY 
+    DATE_TO_STRING(DATE_TRUNC(TO_DATE(created_at_timestamp * 1000), 'week'), '%b %d, %Y', 'UTC'),
+    DIVIDE(TO_LONG(DATE_TRUNC(TO_DATE(created_at_timestamp * 1000), 'week')), 1000)
+  ORDER BY week_start DESC
+
+ee) Q: "Hourly event activity breakdown"
+A: SELECT 
+    HOUR(TO_DATE(timestamp * 1000)) as hour,
+    COUNT(*) as event_count
+  FROM events
+  WHERE is_deleted = false
+  GROUP BY HOUR(TO_DATE(timestamp * 1000))
+  ORDER BY hour
+
+ff) Q: "Event activity by time ranges"
+A: SELECT 
+    CASE
+      WHEN HOUR(TO_DATE(timestamp * 1000)) >= 0 AND HOUR(TO_DATE(timestamp * 1000)) <= 3 THEN '00:00-03:00'
+      WHEN HOUR(TO_DATE(timestamp * 1000)) >= 4 AND HOUR(TO_DATE(timestamp * 1000)) <= 6 THEN '04:00-06:00'
+      WHEN HOUR(TO_DATE(timestamp * 1000)) >= 7 AND HOUR(TO_DATE(timestamp * 1000)) <= 9 THEN '07:00-09:00'
+      WHEN HOUR(TO_DATE(timestamp * 1000)) >= 10 AND HOUR(TO_DATE(timestamp * 1000)) <= 12 THEN '10:00-12:00'
+      WHEN HOUR(TO_DATE(timestamp * 1000)) >= 13 AND HOUR(TO_DATE(timestamp * 1000)) <= 15 THEN '13:00-15:00'
+      WHEN HOUR(TO_DATE(timestamp * 1000)) >= 16 AND HOUR(TO_DATE(timestamp * 1000)) <= 18 THEN '16:00-18:00'
+      WHEN HOUR(TO_DATE(timestamp * 1000)) >= 19 AND HOUR(TO_DATE(timestamp * 1000)) <= 21 THEN '19:00-21:00'
+      WHEN HOUR(TO_DATE(timestamp * 1000)) >= 22 AND HOUR(TO_DATE(timestamp * 1000)) <= 23 THEN '22:00-23:00'
+    END as time_range,
+    COUNT(*) as event_count
+  FROM events
+  WHERE is_deleted = false
+  GROUP BY time_range
+  ORDER BY time_range
+
+gg) Q: "Hour-by-hour breakdown of activity for today"
+A: SELECT 
+    HOUR(TO_DATE(created_at_timestamp * 1000)) as hour,
+    COUNT(*) as new_contacts,
+    SUM(CASE WHEN total_messages > 0 THEN 1 ELSE 0 END) as active_contacts
+  FROM contacts 
+  WHERE created_at_timestamp >= SUBTRACT(DIVIDE(TO_LONG(CURRENT_DATE()), 1000), MULTIPLY(1, 86400))
+  GROUP BY HOUR(TO_DATE(created_at_timestamp * 1000))
+  ORDER BY hour
+
+hh) Q: "Simple hourly event breakdown"
+A: SELECT 
+    HOUR(TO_DATE(timestamp * 1000)) as hour,
+    COUNT(*) as event_count
+  FROM events
+  WHERE is_deleted = false
+  GROUP BY HOUR(TO_DATE(timestamp * 1000))
+  ORDER BY hour
+
+ii) Q: "Event activity by time ranges (simplified)"
+A: SELECT 
+    CASE
+      WHEN HOUR(TO_DATE(timestamp * 1000)) >= 0 AND HOUR(TO_DATE(timestamp * 1000)) <= 3 THEN '00-03'
+      WHEN HOUR(TO_DATE(timestamp * 1000)) >= 4 AND HOUR(TO_DATE(timestamp * 1000)) <= 6 THEN '04-06'
+      WHEN HOUR(TO_DATE(timestamp * 1000)) >= 7 AND HOUR(TO_DATE(timestamp * 1000)) <= 9 THEN '07-09'
+      WHEN HOUR(TO_DATE(timestamp * 1000)) >= 10 AND HOUR(TO_DATE(timestamp * 1000)) <= 12 THEN '10-12'
+      WHEN HOUR(TO_DATE(timestamp * 1000)) >= 13 AND HOUR(TO_DATE(timestamp * 1000)) <= 15 THEN '13-15'
+      WHEN HOUR(TO_DATE(timestamp * 1000)) >= 16 AND HOUR(TO_DATE(timestamp * 1000)) <= 18 THEN '16-18'
+      WHEN HOUR(TO_DATE(timestamp * 1000)) >= 19 AND HOUR(TO_DATE(timestamp * 1000)) <= 21 THEN '19-21'
+      WHEN HOUR(TO_DATE(timestamp * 1000)) >= 22 AND HOUR(TO_DATE(timestamp * 1000)) <= 23 THEN '22-24'
+    END as time_range,
+    COUNT(*) as event_count
+  FROM events
+  WHERE is_deleted = false
+  GROUP BY time_range
+  ORDER BY time_range
+
+jj) Q: "Who all are involved in events between 6-9 AM"
+A: SELECT 
+    c.full_name as contact_name,
+    c.email,
+    COUNT(e._id) as event_count
+  FROM events e
+  JOIN corecontacts c ON e.core_contact_id = c._id
+  WHERE e.is_deleted = false 
+    AND c.is_deleted = false
+    AND HOUR(TO_DATE(e.timestamp * 1000)) >= 6 
+    AND HOUR(TO_DATE(e.timestamp * 1000)) <= 9
+  GROUP BY c.full_name, c.email
+  ORDER BY event_count DESC
+
+kk) Q: "Who sent WhatsApp messages between 6-9 AM"
+A: SELECT 
+    c.full_name as contact_name,
+    c.email,
+    COUNT(ch._id) as whatsapp_messages
+  FROM chathistories ch
+  JOIN contacts c ON ch.contact_id = c._id
+  WHERE ch.is_deleted = false
+    AND ch.channel = 'WHATSAPP'
+    AND HOUR(TO_DATE(ch.created_at_timestamp * 1000)) >= 6
+    AND HOUR(TO_DATE(ch.created_at_timestamp * 1000)) <= 9
+  GROUP BY c.full_name, c.email
+  ORDER BY whatsapp_messages DESC
+
+ll) Q: "Names and messages of people who sent WhatsApp between 6-9 AM"
+A: SELECT 
+    c.full_name as contact_name,
+    ch.body as message_content,
+    ch.created_at_timestamp
+  FROM chathistories ch
+  JOIN contacts c ON ch.contact_id = c._id
+  WHERE ch.is_deleted = false
+    AND ch.channel = 'WHATSAPP'
+    AND HOUR(TO_DATE(ch.created_at_timestamp * 1000)) >= 6
+    AND HOUR(TO_DATE(ch.created_at_timestamp * 1000)) <= 9
+  ORDER BY ch.created_at_timestamp DESC
+  LIMIT 20
 
 ACTUAL DATABASE SCHEMA:
 {schema}
+
+# TABLE RELATIONSHIPS:
+**CRITICAL: Understanding Table Relationships for JOINs**
+
+1. **events** ↔ **contacts** (Primary Relationship)
+   - `events.contact_id` → `contacts._id` (Foreign Key)
+   - Use: JOIN events ON events.contact_id = contacts._id
+   - Purpose: Link events/activities to specific contacts
+
+2. **events** ↔ **users** (User Activity Tracking)
+   - `events.user_id` → `users._id` (Foreign Key)
+   - Use: JOIN events ON events.user_id = users._id
+   - Purpose: Track which user performed which events
+
+3. **contacts** ↔ **organizations** (Company Association)
+   - `contacts.company` → `organizations.name` (Logical relationship)
+   - Use: JOIN contacts ON contacts.company = organizations.name
+   - Purpose: Link contacts to their organizations
+
+4. **Additional Tables** (Referenced in examples but not in core schema):
+   - `chathistories` - Chat session data (contact_id → contacts._id)
+   - `contacttags` - Contact tagging (contact_id → contacts._id)
+   - `corecontacts` - Extended contact data (contact_id → contacts._id)
+   - `chathistorydetailedmessages` - Individual messages (chat_id → chathistories._id)
+
+**JOIN PATTERNS:**
+- For contact-related events: JOIN events ON events.contact_id = contacts._id
+- For user activity: JOIN events ON events.user_id = users._id
+- For organization data: JOIN contacts ON contacts.company = organizations.name
+- For chat data: JOIN chathistories ON chathistories.contact_id = contacts._id
 
 SAMPLE DATA (first few rows per table):
 {samples}
@@ -2670,6 +3494,77 @@ Follow these strict rules when generating SQL:
 ⚠️  CRITICAL: ALWAYS use table aliases for ALL column references to avoid ambiguous column errors!
 ⚠️  CRITICAL: Once you assign a table alias (e.g., table AS b), ALWAYS use that exact alias (b) for ALL columns from that table!
 ⚠️  CRITICAL: Use ONLY tables and columns that exist in the provided SCHEMA above!
+⚠️  CRITICAL: Use `WHERE is_deleted = false` ONLY for tables that have this field! This excludes soft-deleted records and ensures accurate business data.
+
+**Tables WITH `is_deleted` field (ALWAYS use the filter):**
+- ✅ `corecontacts` - Use `WHERE is_deleted = false` to exclude deleted unified contacts
+- ✅ `events` - Use `WHERE is_deleted = false` to exclude deleted event records  
+- ✅ `chathistories` - Use `WHERE is_deleted = false` to exclude deleted chat sessions
+
+**Tables WITHOUT `is_deleted` field (DO NOT use this filter):**
+- ❌ `contacts` - No soft delete, all records are active
+- ❌ `contacttags` - No soft delete, all tags are active
+⚠️  CRITICAL: Use `HOUR(TO_DATE(field * 1000))` for hour extraction. This is the correct NoQL syntax! NEVER use `EXTRACT()` - it doesn't exist in NoQL!
+⚠️  CRITICAL: NoQL does NOT support `BETWEEN` operator! Use `>=` and `<=` instead. Example: `HOUR(TO_DATE(timestamp * 1000)) >= 0 AND HOUR(TO_DATE(timestamp * 1000)) <= 3`
+⚠️  CRITICAL: For "who" questions, ALWAYS JOIN to get names! Never show just IDs - users want actual names!
+⚠️  CRITICAL: For "hourly activity" or "activity for today" questions, use the `contacts` table, NOT the `events` table!
+⚠️  CRITICAL: Avoid redundant filtering! Don't filter the same condition in both WHERE clause AND CASE statement. Either filter in WHERE (for specific ranges) OR use CASE (for grouping all data).
+⚠️  CRITICAL: For "who" or "people" questions, JOIN with contacts/corecontacts tables to get names, don't just show IDs!
+
+# TABLE USAGE GUIDE:
+**When to use each table based on the question type:**
+
+**📊 CONTACTS Table** - Use for:
+- Lead/contact counts, distributions, and analytics
+- Contact status tracking (IN_PROGRESS, CONVERTED, NOT_QUALIFIED)
+- Lead source analysis (source field)
+- Contact creation trends and timelines
+- Contact demographics (timezone, company)
+- Lead conversion funnel analysis
+- Contact engagement levels (total_messages field)
+
+**📊 EVENTS Table** - Use for:
+- User activity tracking and analytics
+- Event type distributions (PAGE_VIEW, CLICK, FORM_SUBMIT, etc.)
+- Meeting status tracking (MEETING_SCHEDULED, MEETING_ATTENDED, etc.)
+- User behavior analysis
+- Event timeline analysis
+- Activity patterns and trends
+
+**📊 CHATHISTORIES Table** - Use for:
+- Chat session analytics and message counts
+- Communication channel analysis (channel field)
+- Response tracking (first_response_received)
+- Chat engagement metrics
+- Agent performance (agent_id field)
+- Message volume analysis
+
+**📊 CONTACTTAGS Table** - Use for:
+- Contact tagging and categorization
+- Tag distribution analysis
+- Contact segmentation by tags
+
+**📊 CORECONTACTS Table** - Use for:
+- Extended contact data and lifecycle stages
+- Contact lifecycle analysis (lifecycle_stage field)
+- Advanced contact segmentation
+
+**📊 CHATHISTORYDETAILEDMESSAGES Table** - Use for:
+- Individual message analysis
+- Detailed message counts and trends
+- Message-level analytics
+
+**📊 ORGANIZATIONS Table** - Use for:
+- Company/organization data
+- Industry analysis
+- Organization size analysis
+- Company-level metrics
+
+**📊 USERS Table** - Use for:
+- User account information
+- User role analysis
+- User activity tracking
+- User performance metrics
 
 1. **Schema Usage and Validation**
    - CRITICAL: Use ONLY tables and columns that exist in the provided schema above
@@ -3671,25 +4566,25 @@ SQL Query:
 
 # Response prompt for formatting results
 response_prompt = ChatPromptTemplate.from_template(
-    """You are an assistant that formats SQL query results into a JSON list suitable for visualization.
+    """You are an assistant that formats NoQL query results into a JSON list suitable for visualization.
 
 Schema:
 {schema}
 
 Question: {question}
-SQL Query: {query}
-SQL Response: {response}
+NoQL Query: {query}
+NoQL Response: {response}
 Chart Type: {chart_type}
 
-IMPORTANT: The SQL response is a string representation of data. Parse it carefully:
+IMPORTANT: The NoQL response is a string representation of data. Parse it carefully:
 - If it looks like: [('Item1', 123), ('Item2', 456)] - this is a list of tuples
 - If it looks like: [['Item1', 123], ['Item2', 456]] - this is a list of lists
 - If it looks like: [('Item1', 123, 456, 'Text'), ('Item2', 789, 101, 'Text2')] - this has multiple columns
 - Extract the actual data values, not the string representation
 
 For detailed statistics with multiple columns:
-- Use the first column as the label (usually Name, title, etc.)
-- Use the second column as the primary value (usually Population, count, etc.)
+- Use the first column as the label (usually contact_name, source, status, etc.)
+- Use the second column as the primary value (usually count, total_messages, etc.)
 - For tables with multiple columns, include all relevant columns in the data objects
 
 Output ONLY in the following JSON format (use double braces for literal curly braces):
@@ -3713,8 +4608,8 @@ For detailed statistics (multiple columns):
   "y_axis": "<y-axis label>", 
   "chart_type": "{chart_type}",
   "data": [
-    {{ "label": "Country 1", "value": 123, "gnp": 456, "life_expectancy": 78.5 }},
-    {{ "label": "Country 2", "value": 789, "gnp": 101, "life_expectancy": 82.1 }}
+    {{ "label": "Contact 1", "value": 123, "total_messages": 456, "status": "CONVERTED" }},
+    {{ "label": "Contact 2", "value": 789, "total_messages": 101, "status": "IN_PROGRESS" }}
   ]
 }}
 
@@ -3730,56 +4625,6 @@ For scatter plots:
   ]
 }}
 
-For heatmaps:
-{{
-  "title": "<descriptive chart title>",
-  "x_axis": "<x-axis label>",
-  "y_axis": "<y-axis label>", 
-  "chart_type": "heatmap",
-  "data": [
-    {{ "x": "Category A", "y": "Subcategory 1", "value": 123 }},
-    {{ "x": "Category A", "y": "Subcategory 2", "value": 456 }},
-    {{ "x": "Category B", "y": "Subcategory 1", "value": 789 }}
-  ]
-}}
-
-For histograms:
-{{
-  "title": "<descriptive chart title>",
-  "x_axis": "<x-axis label>",
-  "y_axis": "<y-axis label>", 
-  "chart_type": "histogram",
-  "data": [
-    {{ "bin": "0-10", "value": 15 }},
-    {{ "bin": "10-20", "value": 23 }},
-    {{ "bin": "20-30", "value": 18 }}
-  ]
-}}
-
-For stacked bar charts:
-{{
-  "title": "<descriptive chart title>",
-  "x_axis": "<x-axis label>",
-  "y_axis": "<y-axis label>", 
-  "chart_type": "stacked_bar",
-  "data": [
-    {{ "label": "Category 1", "series1": 100, "series2": 50, "series3": 25 }},
-    {{ "label": "Category 2", "series1": 80, "series2": 60, "series3": 40 }}
-  ]
-}}
-
-For area charts:
-{{
-  "title": "<descriptive chart title>",
-  "x_axis": "<x-axis label>",
-  "y_axis": "<y-axis label>", 
-  "chart_type": "area",
-  "data": [
-    {{ "label": "2020", "value": 100 }},
-    {{ "label": "2021", "value": 120 }},
-    {{ "label": "2022", "value": 150 }}
-  ]
-}}
 
 CRITICAL JSON RULES:
 - Return ONLY the JSON object, nothing else
@@ -3787,62 +4632,45 @@ CRITICAL JSON RULES:
 - No markdown code blocks (no ```json)
 - No trailing text after the closing brace
 - Ensure all string values are properly quoted
-- Use actual data from the SQL result, not placeholders
-- Parse the SQL response string to extract real data values
+- Use actual data from the NoQL result, not placeholders
+- Parse the NoQL response string to extract real data values
 
 Important formatting rules:
 - For pie charts: Ensure values are percentages or proportions that add up meaningfully
-- For line charts: Labels should be sequential (years, months, dates, etc.)
+- For line charts: Labels should be sequential (dates, hours, months, etc.)
 - For scatter plots: Include both x and y values as {{ "label": "Item", "x": 123, "y": 456 }}
 - For tables: Use "table" as chart_type and structure data appropriately
-- For heatmaps: Use x, y, and value properties for 2D data visualization
-- For histograms: Use bin ranges and frequency values for distribution analysis
-- For stacked bar charts: Include multiple series values for layered comparisons
-- For area charts: Use sequential labels with cumulative or filled area data
 - Always provide descriptive, clear labels and titles
 
-Critical SQL Rules:
-When generating SQL queries, you must fully comply with MySQL's ONLY_FULL_GROUP_BY mode:
-- Every column in SELECT that is not inside an aggregate (SUM, MAX, COUNT, etc.) must appear in GROUP BY
-- If you want a non-aggregated column (e.g., city name with MAX population), use a subquery or window function
-- Never select non-aggregated columns alongside aggregates without fixing GROUP BY
-- When asked for "largest per group" (e.g., largest city per continent), never mix aggregate functions with non-aggregated columns in the SELECT clause. Instead, use either a correlated subquery (classic MySQL) or a window function (ROW_NUMBER() or RANK()) to ensure the non-aggregated column matches the aggregate.
-- Never write a query that selects a non-aggregated column with an aggregate (like MAX, SUM, etc.) without ensuring the non-aggregated column is included in GROUP BY or properly correlated with a subquery/window function. For cases like "largest city per country", always use a correlated subquery or a window function instead of GROUP BY
+Critical NoQL Rules:
+When generating NoQL queries, follow these specific syntax rules:
+- Use `HOUR(TO_DATE(field * 1000))` for hour extraction, NOT `EXTRACT()`
+- Use `>=` and `<=` instead of `BETWEEN` operator (not supported in NoQL)
+- Include `WHERE is_deleted = false` ONLY for tables that have this field:
+  * ✅ corecontacts, events, chathistories tables HAVE is_deleted field
+  * ❌ contacts, contacttags tables do NOT have is_deleted field
+- Use proper table aliases to avoid ambiguous column errors
+- For "who" questions, always JOIN with contacts/corecontacts tables to get names, not just IDs
 
 AMBIGUOUS COLUMN RULE (CRITICAL):
 - ALWAYS prefix column names with their table alias to avoid ambiguous column errors
-- When joining tables that have columns with the same name (e.g., Population in both country and city tables), you MUST specify which table's column you want: ci.Population for city population, c.Population for country population
-- Example: Use "ci.Population" not "Population" when both country and city tables are joined
+- When joining tables that have columns with the same name (e.g., email in both contacts and chathistories), you MUST specify which table's column you want: c.email for contact email, ch.email for chat email
+- Example: Use "c.full_name" not "full_name" when both contacts and chathistories tables are joined
 - This prevents "Column 'X' in field list is ambiguous" errors
 - CRITICAL: In subqueries, also prefix ALL column references with table aliases
-- Example: Use "sub_c.Population" not "Population" in subqueries
 
 COMMON AMBIGUOUS COLUMN PATTERNS TO AVOID:
-- WRONG: SELECT MAX(Population) FROM city JOIN country ON city.CountryCode = country.Code
-- CORRECT: SELECT MAX(city.Population) FROM city JOIN country ON city.CountryCode = country.Code
-- WRONG: WHERE city.Population = (SELECT MAX(Population) FROM city JOIN country WHERE country.Continent = co.Continent)
-- CORRECT: WHERE a.Population = (SELECT MAX(c.Population) FROM city c JOIN country d ON c.CountryCode = d.Code WHERE d.Continent = b.Continent)
+- WRONG: SELECT full_name FROM chathistories ch JOIN contacts c ON ch.contact_id = c._id
+- CORRECT: SELECT c.full_name FROM chathistories ch JOIN contacts c ON ch.contact_id = c._id
+- WRONG: WHERE email = 'test@example.com' (ambiguous - which email field?)
+- CORRECT: WHERE c.email = 'test@example.com' (clear - contact email)
 
-LARGEST PER GROUP RULE (CRITICAL):
-- For queries like "largest city per continent" or "largest X per Y", NEVER use GROUP BY with non-aggregated columns
-- Instead, use a correlated subquery or window function approach:
-  * CORRELATED SUBQUERY: WHERE a.Population = (SELECT MAX(c.Population) FROM city c JOIN country d ON c.CountryCode = d.Code WHERE d.Continent = b.Continent)
-  * WINDOW FUNCTION: Use ROW_NUMBER() OVER (PARTITION BY c.Continent ORDER BY ci.Population DESC) and filter WHERE rn = 1
-- Example for "largest city per continent":
-  ```sql
-  SELECT a.Continent, b.Name AS LargestCity, b.Population
-  FROM country a 
-  JOIN city b ON a.Code = b.CountryCode
-  WHERE b.Population = (
-    SELECT MAX(c.Population) 
-    FROM city c 
-    JOIN country d ON c.CountryCode = d.Code 
-    WHERE d.Continent = a.Continent
-  )
-  ```
-- CRITICAL: Always use simple a,b,c,d,e,f aliases in subqueries to avoid ambiguous column errors
-- WRONG: SELECT MAX(Population) FROM city (ambiguous - which Population?)
-- CORRECT: SELECT MAX(c.Population) FROM city c (clear - city population with simple alias)
+NOQL-SPECIFIC EXAMPLES:
+- Hour extraction: HOUR(TO_DATE(timestamp * 1000)) >= 6 AND HOUR(TO_DATE(timestamp * 1000)) <= 9
+- Date filtering: created_at_timestamp >= SUBTRACT(DIVIDE(TO_LONG(CURRENT_DATE()), 1000), MULTIPLY(30, 86400))
+- Proper JOIN for names: JOIN contacts c ON ch.contact_id = c._id
+- Channel filtering: WHERE ch.channel = 'WHATSAPP'
+- Status filtering: WHERE c.status = 'CONVERTED'
 """)
 # Function to create SQL chain for specific database
 # Helper function to safely convert values to float
@@ -4160,103 +4988,127 @@ def validate_chart_necessity(question: str, chart_data: dict) -> dict:
 def extract_charts_from_markdown(markdown: str, database_name: str, actual_question: str = None) -> dict:
     """Extract chart blocks from markdown and generate actual chart data"""
     import re
+    import uuid
     
-    # Find all chart blocks in markdown
-    chart_pattern = r'```chart\s*\n(.*?)\n```'
-    chart_blocks = re.findall(chart_pattern, markdown, re.DOTALL)
+    # Find all chart blocks in markdown - more flexible pattern
+    chart_pattern = r'```chart\s*([\s\S]*?)```'
+    chart_blocks = re.findall(chart_pattern, markdown, re.DOTALL | re.IGNORECASE)
+    
+    print(f"🔍 Found {len(chart_blocks)} potential chart blocks in markdown")
     
     charts = []
-    for block in chart_blocks:
+    modified_markdown = markdown
+    
+    for idx, block in enumerate(chart_blocks):
         try:
+            # Clean up the block text
+            block_text = block.strip()
+            
+            # Fix double curly braces from LLM output ({{ -> {, }} -> })
+            if block_text.startswith('{{') and block_text.endswith('}}'):
+                block_text = block_text[1:-1]  # Remove outer layer of double braces
+            
+            print(f"📊 Processing chart block {idx + 1}:")
+            print(f"   Raw: {block_text[:200]}...")  # Show first 200 chars
+            
             # Parse the JSON config
-            chart_cfg = json.loads(block)
+            chart_cfg = json.loads(block_text)
+            
+            # Ensure 'db' field is set if missing
+            if 'db' not in chart_cfg:
+                chart_cfg['db'] = database_name
+                print(f"   ℹ️ Added missing 'db' field: {database_name}")
             
             # Build the actual chart
             chart_data = build_chart_from_cfg(chart_cfg, database_name, actual_question)
             
             # Only add charts that have data
             if chart_data.get("data") and len(chart_data["data"]) > 0:
+                # Generate a unique ID for the chart
+                chart_id = f"chart_{uuid.uuid4().hex[:8]}"
+                chart_data['id'] = chart_id
                 charts.append(chart_data)
+                print(f"   ✅ Chart added: {chart_data.get('title', 'Unknown')} [ID: {chart_id}]")
+                
+                # Replace the ```chart block with a placeholder {{chart:id}}
+                original_block = f"```chart\s*{re.escape(block)}\s*```"
+                placeholder = f"{{{{chart:{chart_id}}}}}"
+                modified_markdown = re.sub(original_block, placeholder, modified_markdown, count=1, flags=re.DOTALL | re.IGNORECASE)
+                print(f"   🔄 Replaced chart block with placeholder: {placeholder}")
             else:
-                print(f"⚠️ Skipping empty chart: {chart_data.get('title', 'Unknown')}")
+                print(f"   ⚠️ Skipping empty chart: {chart_data.get('title', 'Unknown')}")
+                # Remove empty chart blocks from markdown
+                original_block = f"```chart\s*{re.escape(block)}\s*```"
+                modified_markdown = re.sub(original_block, '', modified_markdown, count=1, flags=re.DOTALL | re.IGNORECASE)
+        except json.JSONDecodeError as e:
+            print(f"   ❌ JSON parsing error for chart block {idx + 1}: {e}")
+            print(f"   📄 Block content: {block[:500]}")  # Show more of the block for debugging
+            # Remove malformed chart blocks from markdown
+            original_block = f"```chart\s*{re.escape(block)}\s*```"
+            modified_markdown = re.sub(original_block, '', modified_markdown, count=1, flags=re.DOTALL | re.IGNORECASE)
+            continue
         except Exception as e:
-            print(f"❌ Error processing chart block: {e}")
+            print(f"   ❌ Error processing chart block {idx + 1}: {e}")
+            import traceback
+            traceback.print_exc()
+            # Remove error chart blocks from markdown
+            original_block = f"```chart\s*{re.escape(block)}\s*```"
+            modified_markdown = re.sub(original_block, '', modified_markdown, count=1, flags=re.DOTALL | re.IGNORECASE)
             continue
     
+    print(f"📊 Successfully extracted {len(charts)} charts")
+    print(f"📝 Modified markdown with placeholders")
+    
     return {
-        "markdown": markdown,
+        "markdown": modified_markdown,
         "charts": charts
     }
 
 def build_chart_from_cfg(cfg: dict, database_name: str, actual_question: str = None) -> dict:
     chart_type = cfg.get("type", "bar")
     title = cfg.get("title", "Chart")
-    sql_focus = cfg.get("sql_focus") or cfg.get("question") or title
+    query_focus = cfg.get("sql_focus") or cfg.get("question") or title
     
     # If the chart question is generic ("Chart"), use the actual user question
-    if sql_focus.lower() in ["chart", "charts", "visualization"] and actual_question:
-        print(f"⚠️ Chart has generic question '{sql_focus}', using actual question: '{actual_question}'")
-        sql_focus = actual_question
+    if query_focus.lower() in ["chart", "charts", "visualization"] and actual_question:
+        print(f"⚠️ Chart has generic question '{query_focus}', using actual question: '{actual_question}'")
+        query_focus = actual_question
         title = f"Analysis: {actual_question[:50]}..." if len(actual_question) > 50 else actual_question
     
     db_name = database_name
     
-    sql_chain = create_anydb_sql_chain(db_name)
+    noql_chain = create_anydb_sql_chain(db_name)
     
-    query = sql_chain.invoke({"question": f"{sql_focus}"})
-    query = _strip_sql_fences(query)
-    
-    # Validate the query against the schema
-    validation_result = validate_sql_against_schema(query, db_name)
-    if not validation_result["valid"]:
-        print(f"❌ Schema validation failed: {validation_result['error']}")
-        print(f"🔄 Attempting to regenerate query with explicit schema reminder...")
-        
-        # Try again with more explicit schema injection
-        schema_text = get_schema(db_name)
-        enhanced_question = f"""
-        {sql_focus}
-        
-        CRITICAL: Use ONLY these tables and columns from the {db_name} database:
-        {schema_text}
-        
-        Do NOT assume any columns exist that are not listed above.
-        """
-        query = sql_chain.invoke({"question": enhanced_question})
-        query = _strip_sql_fences(query)
-        print(f"🔄 Regenerated query: {query}")
+    query = noql_chain.invoke({"question": f"{query_focus}"})
     # Apply chart-type specific limits
     default_limits = {
-        "pie": 6, "bar": 20, "horizontal_bar": 15, "lollipop": 25, 
-        "line": 50, "slope": 10, "bump": 15, "scatter": 100, 
-        "treemap": 30, "table": 50, "area": 50, "histogram": 20, 
-        "heatmap": 100, "stacked_bar": 15
+        "pie": 6, "bar": 20, "line": 50, "scatter": 100, "table": 50
     }
     limit_val = default_limits.get(chart_type, 50)
-    query = ensure_limit(query, limit_val)
+    query = normalize_query(query, limit_val)
     
-    # Enhanced SQL logging
-    print(f"\n🔍 === CHART SQL EXECUTION ===")
+    # Enhanced query logging
+    print(f"\n🔍 === CHART QUERY EXECUTION ===")
     print(f"📊 Chart Type: {chart_type}")
-    print(f"🎯 Question/Focus: {sql_focus}")
+    print(f"🎯 Question/Focus: {query_focus}")
     print(f"🗄️ Database: {db_name}")
-    print(f"📝 Generated SQL Query:")
+    print(f"📝 Generated NoQL Query:")
     print(f"   {query}")
     
-    # Keep title clean - no SQL details for users
+    # Keep title clean - no query details for users
     # The title already describes what the chart shows
     
     response, columns = run_query(query, db_name, return_columns=True)
     
-    print(f"📋 SQL Columns: {columns}")
-    print(f"📊 SQL Result Rows: {len(response) if response else 0}")
+    print(f"📋 Query Columns: {columns}")
+    print(f"📊 Query Result Rows: {len(response) if response else 0}")
     if response and len(response) > 0:
         print(f"🔍 First few rows:")
         for i, row in enumerate(response[:3]):  # Show first 3 rows
             print(f"   Row {i+1}: {row}")
         if len(response) > 3:
             print(f"   ... and {len(response) - 3} more rows")
-    print(f"🔚 === END SQL EXECUTION ===\n")
+    print(f"🔚 === END QUERY EXECUTION ===\n")
     
     # ⚠️ CRITICAL: Skip single-value charts (useless)
     if not response or len(response) <= 1:
@@ -4270,8 +5122,8 @@ def build_chart_from_cfg(cfg: dict, database_name: str, actual_question: str = N
         }
     
     parsed_data = response
-    formatted = format_data_for_chart_type(parsed_data, chart_type, sql_focus, columns)
-    x_axis, y_axis = generate_axis_labels(chart_type, columns, sql_focus, title)
+    formatted = format_data_for_chart_type(parsed_data, chart_type, query_focus, columns)
+    x_axis, y_axis = generate_axis_labels(chart_type, columns, query_focus, title)
     return {
         "title": title,
         "x_axis": x_axis,
@@ -4288,7 +5140,7 @@ def generate_chat_response(question: str, database_name: str, conversation_id: s
         conversation_id: Optional conversation ID to scope facts to current conversation
     """
     try:
-        schema_info = get_schema(database_name)
+        schema_info = _SCHEMA_JSON
         exploration = explore_data_for_facts(question=question, database_name=database_name, conversation_id=conversation_id)
         facts_text = exploration.get("facts", "(no precomputed facts)")
         allowed_text = exploration.get("allowed", "(none)")
@@ -4297,7 +5149,7 @@ def generate_chat_response(question: str, database_name: str, conversation_id: s
         response = chain.invoke({
             "question": question,
             "database_name": database_name,
-            "schema": get_schema(database_name),
+            "schema": _SCHEMA_JSON,
             "samples": safe_json_dumps(sample_database_tables(database_name), ensure_ascii=False)[:4000],
             "facts": facts_text,
             "allowed_entities": allowed_text,
@@ -4320,62 +5172,6 @@ Unfortunately, I encountered an error while generating the detailed response. Pl
             "markdown": fallback_markdown,
             "facts": ""
         }
-def generate_narrative(question: str, charts: list) -> dict:
-    """Generate connecting narrative for charts (single or multiple)"""
-    try:
-        # Create chart info summary for the AI
-        chart_info = []
-        for i, chart in enumerate(charts, 1):
-            chart_info.append(f"Chart {i}: {chart.get('chart_type', 'unknown')} - {chart.get('title', 'Untitled')}")
-        
-        chart_info_str = "\n".join(chart_info)
-        print(f"Chart info for narrative: {chart_info_str}")
-        
-        # Generate narrative
-        chain = narrative_prompt | llm | StrOutputParser()
-        response = chain.invoke({
-            "question": question,
-            "chart_info": chart_info_str
-        })
-        
-        print(f"Raw narrative response: {response}")
-        
-        # Clean up response (remove markdown if present)
-        cleaned_response = response.strip()
-        if cleaned_response.startswith('```json'):
-            cleaned_response = cleaned_response[7:]
-        if cleaned_response.endswith('```'):
-            cleaned_response = cleaned_response[:-3]
-        cleaned_response = cleaned_response.strip()
-        
-        print(f"Cleaned narrative response: {cleaned_response}")
-        
-        # Parse JSON
-        narrative = json.loads(cleaned_response)
-        print(f"Parsed narrative: {narrative}")
-        return narrative
-        
-    except Exception as e:
-        print(f"Error generating narrative: {e}")
-        # Return fallback narrative based on number of charts
-        if len(charts) == 1:
-            return {
-                "introduction": f"I've analyzed the data regarding {question.lower()} and found several noteworthy patterns. The information reveals some interesting aspects that provide insight into this topic.",
-                "transitions": [],  # No transitions needed for single chart
-                "insights": [
-                    "The data demonstrates clear patterns that help explain the underlying trends and relationships in this area.",
-                    "These findings provide valuable context for understanding the broader implications and how different factors interact with each other."
-                ],
-                "conclusion": "This analysis provides a comprehensive view of the topic and offers useful insights for understanding the key dynamics at play."
-            }
-        else:
-            return {
-                "introduction": f"I've conducted a thorough analysis of {question.lower()} and there are several important dimensions to consider. The data reveals multiple perspectives that together provide a comprehensive understanding of the topic.",
-                "transitions": ["Looking at this from another perspective provides additional context and helps build a more complete picture of the situation." if len(charts) > 1 else ""] * max(0, len(charts) - 1),
-                "insights": ["The analysis reveals significant variations and patterns that demonstrate the complexity of this topic and highlight the importance of examining it from multiple angles."],
-                "conclusion": "Taken together, these different perspectives provide a thorough understanding of the topic and demonstrate the value of comprehensive data analysis."
-            }
-
 # Helper function to convert day-of-week numbers to names
 def convert_day_number_to_name(day_num):
     """Convert DAY_OF_WEEK number (1-7) to day name"""
@@ -4424,20 +5220,11 @@ def format_data_for_chart_type(data, chart_type, question, columns=None):
     # Limit data size for better visualization and performance
     original_length = len(data)
     max_items = {
-        'pie': 6,           # Pie charts should have very few slices
-        'bar': 20,          # Bar charts can handle more items
-        'horizontal_bar': 15, # Horizontal bars work well for rankings
-        'lollipop': 25,     # Lollipop charts can handle more items cleanly
-        'line': 50,         # Line charts can show more data points
-        'slope': 10,        # Slope charts work best with fewer categories
-        'bump': 15,         # Bump charts for ranking changes
-        'scatter': 100,     # Scatter plots can handle many points
-        'treemap': 30,      # Treemap can show hierarchical data
-        'table': 50,        # Tables can show more rows but limit for performance
-        'area': 50,         # Area charts similar to line charts
-        'histogram': 20,    # Histogram bins
-        'heatmap': 100,     # Heatmaps can handle more data points
-        'stacked_bar': 15   # Stacked bars get complex with many categories
+        'pie': 6,      # Pie charts should have very few slices
+        'bar': 20,     # Bar charts can handle more items
+        'line': 50,    # Line charts can show more data points
+        'scatter': 100, # Scatter plots can handle many points
+        'table': 50    # Tables can show more rows but limit for performance
     }
 
     limit = max_items.get(chart_type, 20)  # Default to 20 items
@@ -4459,94 +5246,12 @@ def format_data_for_chart_type(data, chart_type, question, columns=None):
                 })
         return formatted_data
     
-    elif chart_type in ["lollipop", "horizontal_bar"]:
-        # For lollipop and horizontal bar charts, format similar to bar charts
-        # but with specific styling hints
-        formatted_data = []
-        
-        # Determine which columns to use for label and value
-        if columns:
-            label_col_idx = get_best_column_index(columns, "x")
-            value_col_idx = get_best_column_index(columns, "y")
-        else:
-            label_col_idx = 0
-            value_col_idx = -1  # Last column
-        
-        # Check if first column is day of week
-        is_dow = False
-        if columns and len(columns) > 0:
-            is_dow = is_day_of_week_column(columns[label_col_idx] if label_col_idx < len(columns) else columns[0], question)
-        
-        for item in data:
-            if len(item) >= 2:
-                try:
-                    if label_col_idx < len(item):
-                        label_value = str(item[label_col_idx])
-                    else:
-                        label_value = str(item[0])
-                    
-                    # Convert day numbers to day names if applicable
-                    if is_dow and label_value.isdigit():
-                        label_value = convert_day_number_to_name(label_value)
-                    
-                    if value_col_idx >= 0 and value_col_idx < len(item):
-                        numeric_value = safe_float(item[value_col_idx])
-                    elif value_col_idx == -1 and len(item) > 0:
-                        numeric_value = safe_float(item[-1])
-                    else:
-                        numeric_value = safe_float(item[1])
-                        
-                    formatted_data.append({
-                        "label": label_value,
-                        "value": numeric_value,
-                        "chart_style": chart_type  # Hint for frontend styling
-                    })
-                        
-                except (IndexError, ValueError):
-                    label_raw = str(item[0])
-                    # Convert day numbers for fallback case too
-                    if is_dow and label_raw.isdigit():
-                        label_raw = convert_day_number_to_name(label_raw)
-                    
-                    formatted_data.append({
-                        "label": label_raw,
-                        "value": safe_float(item[1]) if len(item) > 1 else 0.0,
-                        "chart_style": chart_type
-                    })
-        return formatted_data
-    
-    elif chart_type in ["slope", "bump"]:
-        # For slope/bump charts, we need time-based data
-        formatted_data = []
-        for item in data:
-            if len(item) >= 3:  # category, time_period, value
-                formatted_data.append({
-                    "category": str(item[0]),
-                    "period": str(item[1]),
-                    "value": safe_float(item[2]),
-                    "chart_style": chart_type
-                })
-        return formatted_data
-    
-    elif chart_type == "treemap":
-        # For treemap, we need hierarchical data
-        formatted_data = []
-        for item in data:
-            if len(item) >= 2:
-                formatted_data.append({
-                    "label": str(item[0]),
-                    "value": safe_float(item[1]),
-                    "size": safe_float(item[1]),  # Size for treemap
-                    "chart_style": "treemap"
-                })
-        return formatted_data
-    
     else:
-        # Default formatting for bar, line, pie, table, area
+        # Default formatting for bar, line, pie, table
         formatted_data = []
         
         # SPECIAL CASE: Pie chart with 1 row but multiple numeric columns
-        # This happens when SQL uses CASE statements to pivot data
+        # This happens when NoQL uses CASE statements to pivot data
         # e.g., SELECT SUM(CASE...) AS English, SUM(CASE...) AS Ndebele
         if chart_type == "pie" and len(data) == 1 and columns and len(columns) >= 2:
             row = data[0]
@@ -4682,320 +5387,10 @@ def format_data_for_chart_type(data, chart_type, question, columns=None):
 
                 formatted_data.append(data_obj)
         return formatted_data
-def validate_and_enhance_chart_suggestions(suggestions: list, question: str, database_name: str) -> list:
-    """Validate chart suggestions for robustness and add fallbacks if needed"""
-    print(f"🔍 Validating chart robustness: {len(suggestions)} initial suggestions")
-    
-    # Ensure minimum chart count (increased from 3 to 4)
-    if len(suggestions) < 4:
-        print(f"⚠️ Only {len(suggestions)} charts suggested, adding fallbacks for robustness (minimum: 4)")
-        
-        # Add common fallback chart patterns
-        fallback_charts = [
-            {
-                "chart_type": "horizontal_bar",
-                "title": f"Top Rankings: {question[:30]}",
-                "reason": "Clean ranking visualization with readable labels",
-                "sql_focus": "Top ranking entities with performance metrics",
-                "analysis_level": "detailed"
-            },
-            {
-                "chart_type": "lollipop",
-                "title": f"Performance Leaders: {question[:30]}",
-                "reason": "Modern ranking visualization emphasizing values",
-                "sql_focus": "Key performers with clean value emphasis",
-                "analysis_level": "detailed"
-            },
-            {
-                "chart_type": "pie",
-                "title": f"Distribution Analysis: {question[:30]}",
-                "reason": "Categorical distribution and proportions",
-                "sql_focus": "Categorical breakdown with proportional analysis",
-                "analysis_level": "overview"
-            },
-            {
-                "chart_type": "line",
-                "title": f"Trend Analysis: {question[:30]}",
-                "reason": "Temporal patterns and trends over time",
-                "sql_focus": "Time-based analysis with trend identification",
-                "analysis_level": "comparative"
-            },
-            {
-                "chart_type": "treemap",
-                "title": f"Hierarchical View: {question[:30]}",
-                "reason": "Proportional hierarchical visualization",
-                "sql_focus": "Nested categorical data with size relationships",
-                "analysis_level": "advanced"
-            },
-            {
-                "chart_type": "table",
-                "title": f"Detailed Data: {question[:30]}",
-                "reason": "Comprehensive detailed view with multiple metrics",
-                "sql_focus": "Multi-dimensional detailed analysis",
-                "analysis_level": "contextual"
-            }
-        ]
-        
-        # Add fallbacks until we have at least 4 charts
-        existing_types = {s.get("chart_type") for s in suggestions}
-        for fallback in fallback_charts:
-            if len(suggestions) >= 6:  # Cap at 6 charts for performance
-                break
-            if fallback["chart_type"] not in existing_types:
-                suggestions.append(fallback)
-                existing_types.add(fallback["chart_type"])
-    
-    # Ensure diversity in chart types
-    chart_types = [s.get("chart_type") for s in suggestions]
-    unique_types = len(set(chart_types))
-    
-    if unique_types < 3 and len(suggestions) >= 3:
-        print(f"⚠️ Only {unique_types} unique chart types, enhancing diversity")
-        # This is handled by the fallback addition above
-    
-    print(f"✅ Final chart suggestions: {len(suggestions)} charts with {len(set(chart_types))} unique types")
-    return suggestions[:6]  # Cap at 6 charts for performance
-
 # Function to create full chain for specific database with intelligent chart selection
-def create_charts(question: str, database_name="airportdb", multiple=False):
-    """Create single or multiple charts based on the multiple parameter with strict validation"""
-    
-    # Step 1: Check question relevance
-    relevance_check = check_question_relevance(question, database_name)
-    if not relevance_check["relevant"]:
-        return create_error_response(
-            "irrelevant_question", 
-            relevance_check["error"], 
-            relevance_check["suggestion"]
-        )
-    
-    try:
-        sql_chain = create_anydb_sql_chain(database_name)
-        
-        if not multiple:
-            # Single chart mode - simplified logic
-            def process_single_chart(inputs):
-                query = sql_chain.invoke(inputs)
-                query = _strip_sql_fences(query)
-                query = ensure_limit(query, 50)
-                
-                print(f"\n🔍 === SINGLE CHART SQL EXECUTION ===")
-                print(f"🎯 Question: {inputs['question']}")
-                print(f"🗄️ Database: {database_name}")
-                print(f"📝 Generated SQL Query: {query}")
-                
-                try:
-                    response, columns = run_query(query, database_name, return_columns=True)
-                except Exception as e:
-                    print(f"❌ SQL execution failed: {e}")
-                    return create_error_response(
-                        "sql_execution_error",
-                        f"Failed to execute SQL query: {str(e)}",
-                        "Please try rephrasing your question or check if the data exists"
-                    )
-                
-                # Validate query results
-                validation = validate_sql_result(response, columns)
-                if not validation["valid"]:
-                    print(f"❌ Data validation failed: {validation['error']}")
-                    return create_error_response(
-                        "invalid_data",
-                        validation["error"],
-                        validation["suggestion"]
-                    )
-                
-                print(f"📋 SQL Columns: {columns}")
-                print(f"📊 SQL Result Rows: {len(response) if response else 0}")
-                if response and len(response) > 0:
-                    print(f"🔍 First few rows:")
-                    for i, row in enumerate(response[:3]):
-                        print(f"   Row {i+1}: {row}")
-                    if len(response) > 3:
-                        print(f"   ... and {len(response) - 3} more rows")
-                print(f"🔚 === END SQL EXECUTION ===\n")
-                
-                # Get chart type from suggestions
-                try:
-                    chain = chart_suggestion_prompt | llm | StrOutputParser()
-                    suggestion_response = chain.invoke({"schema": get_schema(database_name), "question": inputs["question"]})
-                    suggestions_data = json.loads(suggestion_response)
-                    suggestions = suggestions_data.get("suggestions", [])
-                    chart_type = suggestions[0].get("chart_type", "bar") if suggestions else "bar"
-                except Exception as e:
-                    print(f"Error getting chart suggestion: {e}")
-                    chart_type = "bar"
-                
-                # Format data and create chart
-                try:
-                    formatted_data = format_data_for_chart_type(response, chart_type, inputs["question"], columns)
-                    
-                    # Final validation - ensure we have meaningful formatted data
-                    if not formatted_data or len(formatted_data) == 0:
-                        print("❌ No meaningful data after formatting")
-                        return create_no_data_response(inputs["question"])
-                        
-                except Exception as e:
-                    print(f"❌ Data formatting failed: {e}")
-                    return create_error_response(
-                        "data_formatting_error",
-                        f"Failed to format data: {str(e)}",
-                        "The query returned data but it couldn't be formatted for display"
-                    )
-                
-                title = f"Analysis: {inputs['question'][:50]}..."
-                x_axis, y_axis = generate_axis_labels(chart_type, columns, inputs["question"], title)
-                
-                return {
-                    "title": title,
-                    "x_axis": x_axis,
-                    "y_axis": y_axis,
-                    "chart_type": chart_type,
-                    "data": formatted_data
-                }
-            
-            return process_single_chart({"question": question})
-        
-        else:
-            # Multiple charts mode
-            try:
-                schema = get_schema(database_name)
-                chain = chart_suggestion_prompt | llm | StrOutputParser()
-                response = chain.invoke({"schema": schema, "question": question})
-
-            # Parse the JSON response
-                try:
-                    cleaned_response = response.strip()
-                    if cleaned_response.startswith('```json'):
-                                cleaned_response = cleaned_response[7:]
-                    if cleaned_response.endswith('```'):
-                                cleaned_response = cleaned_response[:-3]
-                    cleaned_response = cleaned_response.strip()
-
-                    suggestions_data = json.loads(cleaned_response)
-                    suggestions = suggestions_data.get("suggestions", [])
-                    print(f"AI suggested {len(suggestions)} charts:")
-                    for i, suggestion in enumerate(suggestions):
-                        print(f"  {i+1}. {suggestion.get('chart_type')} - {suggestion.get('title')}")
-                except json.JSONDecodeError as e:
-                    print(f"Failed to parse chart suggestions JSON: {e}")
-                    suggestions = [{
-                            "chart_type": "bar",
-                            "title": f"Analysis: {question[:50]}...",
-                            "reason": "Bar chart for data comparison",
-                            "sql_focus": "Main data points"
-                        }]
-            except Exception as e:
-                print(f"Error in chart suggestion: {e}")
-                suggestions = [{
-                        "chart_type": "bar",
-                        "title": f"Analysis: {question[:50]}...",
-                        "reason": "Default bar chart",
-                        "sql_focus": "Main data points"
-                    }]
-
-            # Validate suggestions
-        suggestions = validate_and_enhance_chart_suggestions(suggestions, question, database_name)
-
-        if not suggestions:
-                return create_charts(question, database_name, multiple=False)
-
-        charts = []
-        seen_signatures = set()
-
-        for suggestion in suggestions:
-            try:
-                chart_type = suggestion.get("chart_type", "bar")
-                title = suggestion.get("title", f"Analysis: {question[:50]}...")
-                sql_focus = suggestion.get("sql_focus", "Main data points")
-
-                modified_inputs = {"question": f"{question} - Focus: {sql_focus}"}
-                query = sql_chain.invoke(modified_inputs)
-                query = _strip_sql_fences(query)
-                    
-                default_limits = {"pie": 6, "bar": 20, "line": 50, "scatter": 100, "table": 50}
-                limit_val = default_limits.get(chart_type, 50)
-                query = ensure_limit(query, limit_val)
-                
-                print(f"\n🔍 === MULTIPLE CHARTS SQL EXECUTION ===")
-                print(f"📊 Chart {len(charts) + 1} - Type: {chart_type}")
-                print(f"🎯 SQL Focus: {sql_focus}")
-                print(f"🗄️ Database: {database_name}")
-                print(f"📝 Generated SQL Query: {query}")
-                
-                response, columns = run_query(query, database_name, return_columns=True)
-                
-                print(f"📋 SQL Columns: {columns}")
-                print(f"📊 SQL Result Rows: {len(response) if response else 0}")
-                if response and len(response) > 0:
-                    print(f"🔍 First few rows:")
-                    for i, row in enumerate(response[:3]):
-                        print(f"   Row {i+1}: {row}")
-                    if len(response) > 3:
-                        print(f"   ... and {len(response) - 3} more rows")
-                print(f"🔚 === END SQL EXECUTION ===\n")
-
-                formatted_data = format_data_for_chart_type(response, chart_type, question, columns)
-
-                # Add note if data was limited
-                original_count = len(response) if response else 0
-                final_count = len(formatted_data) if formatted_data else 0
-                if original_count > final_count and final_count > 0:
-                    title += f" (Top {final_count})"
-
-                x_axis, y_axis = generate_axis_labels(chart_type, columns, question, title)
-
-                chart_data = {
-                    "title": title,
-                    "x_axis": x_axis,
-                    "y_axis": y_axis,
-                    "chart_type": chart_type,
-                    "data": formatted_data
-                }
-
-                if not formatted_data:
-                    print("⚠️ Skipping chart with empty data")
-                    continue
-
-                    # De-duplicate
-                labels = [str(d.get('label')) for d in formatted_data[:5]]
-                signature = (chart_type, title.lower(), tuple(labels))
-                if signature in seen_signatures:
-                    print("⚠️ Skipping duplicate chart suggestion")
-                    continue
-                seen_signatures.add(signature)
-
-                charts.append(chart_data)
-            except Exception as e:
-                print(f"Error creating chart for {suggestion.get('chart_type', 'unknown')}: {e}")
-                charts.append({
-                    "title": f"Error: {suggestion.get('title', 'Chart')}",
-                    "x_axis": "Error",
-                    "y_axis": "Count",
-                    "chart_type": "bar",
-                    "data": [{"label": "Error", "value": 1}]
-                })
-
-        print(f"Total charts generated: {len(charts)}")
-        if len(charts) >= 1:
-            print(f"Generating narrative for {len(charts)} chart(s)...")
-            narrative = generate_narrative(question, charts)
-            print(f"Generated narrative: {narrative}")
-
-            return {
-                "charts": charts,
-                "narrative": narrative
-            }
-        else:
-                print("No charts generated, falling back to single chart")
-                return create_charts(question, database_name, multiple=False)
-
-    except Exception as e:
-        print(f"Error in create_charts: {e}")
-        # Ultimate fallback
-        try:
-            return create_charts(question, database_name, multiple=False)
-        except:
-            return None
+def create_charts(question: str, database_name="zigment"):
+    """Create single chart with strict validation"""
+    return execute_noql_question(question, database_name, output_format="chart", debug=True)
 
 @app.route('/health', methods=['GET'])
 def health_check():
@@ -5014,14 +5409,13 @@ def ask_question():
             return jsonify({"error": "Question is required"}), 400
         
         question = data['question']
-        database = (data.get('database') or 'airportdb')
+        database = (data.get('database') or 'zigment')
         try:
             register_database(database)
         except Exception:
             pass
         
-        # Check if user wants multiple charts (default to True for now)
-        generate_multiple = data.get('multiple_charts', True)
+        # Check if user wants anydb mode or text-first mode
         anydb_mode = bool(data.get('anydb_mode'))
         text_first = data.get('text_first', False)
         markdown = data.get('markdown')
@@ -5030,7 +5424,7 @@ def ask_question():
         conversation_id = data.get('conversation_id')
 
         if anydb_mode and not text_first:
-            # Universal any-DB path: introspect + generate SQL
+            # Universal any-DB path: introspect + generate NoQL query
             result = answer_anydb_question(question, database)
             
             # Check if result is an error response
@@ -5040,7 +5434,7 @@ def ask_question():
             return jsonify({
                 "success": True,
                 "mode": "anydb",
-                "sql": result.get("sql"),
+                "query": result.get("query"),
                 "data": {
                     "title": f"Answer for: {question[:50]}...",
                     "x_axis": result.get("columns", ["col_0"])[0] if result.get("columns") else "Row",
@@ -5054,9 +5448,7 @@ def ask_question():
 
         if text_first:
             if markdown:
-                # Text-first flow with provided markdown: render markdown and extract charts
-                # COMMENTED OUT: render_markdown_with_charts is not defined
-                # rendered = render_markdown_with_charts(markdown, database, question)
+                # Text-first flow with provided markdown
                 rendered = {"markdown": markdown, "charts": [], "facts": ""}
                 # Persist if a conversation id exists
                 if conversation_id:
@@ -5171,7 +5563,7 @@ def ask_question():
                 def _invoke_with_history(q: str, h: str) -> str:
                     try:
                         register_database(database)
-                        schema_info = get_schema(database)
+                        schema_info = _SCHEMA_JSON
                         # Pass conversation_id to scope facts properly
                         exploration = explore_data_for_facts(question=q, database_name=database, conversation_id=conversation_id)
                         facts_text = exploration.get('facts', '(no precomputed facts)')
@@ -5180,7 +5572,7 @@ def ask_question():
                         return chain.invoke({
                             "question": q,
                             "database_name": database,
-                            "schema": get_schema(database),
+                            "schema": _SCHEMA_JSON,
                             "samples": safe_json_dumps(sample_database_tables(database), ensure_ascii=False)[:4000],
                             "facts": facts_text,
                             "allowed_entities": allowed_text,
@@ -5227,39 +5619,12 @@ def ask_question():
                     "conversation_id": conversation_id
                 })
         
-        if generate_multiple:
-            # Generate multiple charts
-            result = create_charts(question, database, multiple=True)
-            
-            # Check if result is an error response
-            if isinstance(result, dict) and "success" in result and not result["success"]:
-                return jsonify(result)
-            
-            # Check if result contains narrative (multiple charts) or is a single chart
-            if isinstance(result, dict) and "charts" in result and "narrative" in result:
-                # Multiple charts with narrative
-                return jsonify({
-                    "success": True,
-                    "data": result["charts"],
-                    "narrative": result["narrative"],
-                    "question": question,
-                    "database": database
-                })
-            else:
-                # Single chart or fallback
-                return jsonify({
-                    "success": True,
-                    "data": result,
-                    "question": question,
-                    "database": database
-                })
-        else:
-            # Generate single chart (original behavior)
-            chart_data = create_charts(question, database, multiple=False)
-            
-            # Check if result is an error response
-            if isinstance(chart_data, dict) and "success" in chart_data and not chart_data["success"]:
-                return jsonify(chart_data)
+        # Generate single chart
+        chart_data = create_charts(question, database)
+        
+        # Check if result is an error response
+        if isinstance(chart_data, dict) and "success" in chart_data and not chart_data["success"]:
+            return jsonify(chart_data)
         
         return jsonify({
             "success": True,
@@ -5276,105 +5641,6 @@ def ask_question():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-@app.route('/api/check-database', methods=['POST'])
-def check_database():
-    """Check if a given database exists on the server via SHOW DATABASES.
-
-    Payloads supported (mirrors test_show_databases.py behavior):
-    - { "name": "chinook" }  → uses MYSQL_SERVER_URI env to connect, runs SHOW DATABASES
-    - { "uri": "mysql+pymysql://user:pass@host:3306/", "name": "chinook" } → uses provided URI
-    - { "text": "chinook" }  → same as name
-    Returns: { success, available, checked_via, name, match_type?, matched? }
-    """
-    try:
-        data = request.get_json(silent=True) or {}
-        text = (data.get('text') or '').strip()
-        name = (data.get('name') or data.get('database') or text or '').strip()
-        uri = (data.get('uri') or '').strip()
-
-        def _attempt_connect(test_uri: str):
-            import sqlalchemy as sa
-            engine = sa.create_engine(test_uri, pool_pre_ping=True)
-            return engine
-
-        def _show_databases(engine) -> list:
-            import sqlalchemy as sa
-            with engine.connect() as conn:
-                rows = conn.execute(sa.text("SHOW DATABASES")).fetchall()
-                return [r[0] for r in rows]
-
-        def _normalize_name(value) -> str:
-            try:
-                if isinstance(value, bytes):
-                    value = value.decode("utf-8", errors="ignore")
-                s = str(value)
-            except Exception:
-                s = ""
-            # Strip common wrappers like quotes, backticks, and the python bytes repr artifacts
-            s = s.strip().strip("`").strip("\"").strip("'")
-            if s.startswith("b(") and s.endswith(")"):
-                s = s[2:-1]
-            if s.startswith("b'") and s.endswith("'"):
-                s = s[2:-1]
-            if s.startswith('b"') and s.endswith('"'):
-                s = s[2:-1]
-            return s.lower()
-
-        # If a URI is provided, attempt real connection check against that server
-        if uri:
-            try:
-                engine = _attempt_connect(uri)
-                dbs = _show_databases(engine)
-                normalized_list = [_normalize_name(d) for d in dbs]
-                normalized_name = _normalize_name(name) if name else None
-                exact = (normalized_name in normalized_list) if normalized_name else True
-                return jsonify({
-                    "success": True,
-                    "available": bool(exact),
-                    "checked_via": "uri",
-                    "name": name or None
-                })
-            except Exception as exc:
-                return jsonify({
-                    "success": True,
-                    "available": False,
-                    "checked_via": "uri",
-                    "name": name or None,
-                    "error": str(exc)
-                })
-
-        # Otherwise, require a name and use server-level URI from environment
-        if not name:
-            return jsonify({"success": False, "available": False, "error": "Provide either 'uri' or 'name'"}), 400
-
-        server_uri = os.getenv('MYSQL_SERVER_URI')
-        if not server_uri:
-            return jsonify({
-                "success": False,
-                "available": False,
-                "error": "MYSQL_SERVER_URI is not set. Provide 'uri' or set MYSQL_SERVER_URI."
-            }), 400
-
-        try:
-            engine = _attempt_connect(server_uri)
-            dbs = _show_databases(engine)
-            normalized_list = [_normalize_name(d) for d in dbs]
-            normalized_name = _normalize_name(name)
-            exact = (normalized_name in normalized_list)
-            return jsonify({
-                "success": True,
-                "available": bool(exact),
-                "checked_via": "server",
-                "name": name
-            })
-        except Exception as exc:
-            return jsonify({
-                "success": False,
-                "available": False,
-                "error": str(exc)
-            }), 500
-    except Exception as e:
-        return jsonify({"success": False, "available": False, "error": str(e)}), 500
 
 @app.route('/api/conversations', methods=['GET'])
 def api_list_conversations():
@@ -5413,17 +5679,17 @@ def api_delete_conversation(cid):
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-@app.route('/api/execute-sql', methods=['POST'])
-def execute_sql():
-    """Execute raw SQL query (for debugging)"""
+@app.route('/api/execute-query', methods=['POST'])
+def execute_query():
+    """Execute raw NoQL query (for debugging)"""
     try:
         data = request.get_json()
         
         if not data or 'query' not in data:
-            return jsonify({"error": "SQL query is required"}), 400
+            return jsonify({"error": "NoQL query is required"}), 400
         
         query = data['query']
-        database = (data.get('database') or 'airportdb')
+        database = (data.get('database') or 'zigment')
         
         result = run_query(query, database)
         
@@ -5441,66 +5707,16 @@ def execute_sql():
 def get_databases():
     """Get list of registered databases"""
     try:
-        databases_info = get_available_databases()
+        # Inline function to avoid unnecessary wrapper
+        available: dict[str, str] = {}
+        for name in databases.keys():
+            available[name] = f"Configured database '{name}'"
         return jsonify({
             "success": True,
-            "databases": databases_info
+            "databases": available
         })
     except Exception as e:
         return jsonify({"error": str(e)}), 500
-@app.route('/api/register-database', methods=['POST'])
-def api_register_database():
-    """Register a new database by name/URI after verifying connectivity.
-
-    Payloads supported:
-    - { uri }
-    - { name }
-    - { name, uri }
-    If only name is provided, builds a DB-specific URI using MYSQL_SERVER_URI + name.
-    Returns { success, name } on success.
-    """
-    try:
-        data = request.get_json(silent=True) or {}
-        name = (data.get('name') or '').strip()
-        uri = (data.get('uri') or '').strip()
-
-        # If only URI provided, attempt to infer name from its path
-        if uri and not name:
-            try:
-                # Extract DB part after last '/'
-                from urllib.parse import urlparse
-                parsed = urlparse(uri)
-                path = parsed.path or ''
-                inferred = path.strip('/').split('/')[-1] if path else ''
-                name = inferred or name
-            except Exception:
-                pass
-
-        # If only name is provided, construct a URI from MYSQL_SERVER_URI
-        if name and not uri:
-            base = os.getenv('MYSQL_SERVER_URI')
-            if not base:
-                return jsonify({"success": False, "error": "MYSQL_SERVER_URI not set; provide 'uri' or set server URI"}), 400
-            if not base.endswith('/'):
-                base = base + '/'
-            uri = base + name
-
-        if not name or not uri:
-            return jsonify({"success": False, "error": "Provide at least 'name' or 'uri'"}), 400
-
-        # Verify connectivity to the specific database URI
-        try:
-            import sqlalchemy as sa
-            engine = sa.create_engine(uri, pool_pre_ping=True)
-            with engine.connect() as conn:
-                conn.execute(sa.text("SELECT 1"))
-        except Exception as exc:
-            return jsonify({"success": False, "error": f"Connection failed: {exc}"}), 400
-
-        register_database(name, uri)
-        return jsonify({"success": True, "name": name})
-    except Exception as e:
-        return jsonify({"success": False, "error": str(e)}), 500
 
 @app.route('/api/schema', methods=['GET'])
 def get_database_schema():
@@ -5511,7 +5727,7 @@ def get_database_schema():
             register_database(db_name)
         except Exception:
             pass
-        schema = get_schema(db_name)
+        schema = _SCHEMA_JSON
         counts = get_table_and_column_counts(db_name)
         return jsonify({
             "success": True,
@@ -5522,123 +5738,14 @@ def get_database_schema():
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
 
-@app.route('/api/schema/cache', methods=['GET', 'POST', 'DELETE'])
-def api_manage_schema_cache():
-    """Manage both in-memory schema cache and persistent counts cache"""
-    import time
-    
-    try:
-        if request.method == 'GET':
-            # View cache status (both in-memory and persistent)
-            
-            # In-memory schema cache status
-            schema_cache_status = {
-                "cached": _SCHEMA_CACHE["schema"] is not None,
-                "age_seconds": None,
-                "ttl_seconds": _SCHEMA_CACHE["ttl_seconds"],
-                "status": "empty"
-            }
-            
-            if _SCHEMA_CACHE["timestamp"] is not None:
-                age = time.time() - _SCHEMA_CACHE["timestamp"]
-                schema_cache_status["age_seconds"] = round(age, 1)
-                schema_cache_status["status"] = "fresh" if age < _SCHEMA_CACHE["ttl_seconds"] else "expired"
-            
-            # Persistent counts cache status
-            conn = sqlite3.connect(SCHEMA_CACHE_DB)
-            cursor = conn.cursor()
-            cursor.execute("""
-                SELECT database_name, computed_at, row_count, table_count
-                FROM schema_counts
-                ORDER BY computed_at DESC
-            """)
-            rows = cursor.fetchall()
-            conn.close()
-            
-            cache_entries = []
-            for db_name, computed_at_str, total_rows, table_count in rows:
-                computed_at = datetime.fromisoformat(computed_at_str)
-                age_minutes = (datetime.now() - computed_at).total_seconds() / 60
-                
-                cache_entries.append({
-                    "database": db_name,
-                    "computed_at": computed_at_str,
-                    "age_minutes": round(age_minutes, 1),
-                    "total_rows": total_rows,
-                    "table_count": table_count,
-                    "status": "fresh" if age_minutes < 1440 else "expired"  # 24 hours
-                })
-            
-            return jsonify({
-                "success": True,
-                "schema_cache": schema_cache_status,
-                "cache_file": SCHEMA_CACHE_DB,
-                "counts_cache": cache_entries
-            })
-        
-        elif request.method == 'POST':
-            # Refresh cache for specific database
-            db_name = request.args.get('database') or request.json.get('database')
-            if not db_name:
-                return jsonify({"success": False, "error": "Database name required"}), 400
-            
-            # Force recompute by bypassing cache
-            print(f"🔄 Forcing cache refresh for {db_name}...")
-            counts = get_table_and_column_counts(db_name, use_cache=False)
-            
-            return jsonify({
-                "success": True,
-                "message": f"Cache refreshed for {db_name}",
-                "counts": counts
-            })
-        
-        elif request.method == 'DELETE':
-            # Clear cache for specific database or all
-            db_name = request.args.get('database')
-            
-            # Clear in-memory schema cache
-            _SCHEMA_CACHE["schema"] = None
-            _SCHEMA_CACHE["timestamp"] = None
-            print(f"🗑️ Cleared in-memory schema cache")
-            
-            # Clear persistent counts cache
-            conn = sqlite3.connect(SCHEMA_CACHE_DB)
-            cursor = conn.cursor()
-            
-            if db_name:
-                cursor.execute("DELETE FROM schema_counts WHERE database_name = ?", (db_name,))
-                message = f"Cache cleared for {db_name} (both schema and counts)"
-                # Also clear old in-memory cache if exists
-                if '_counts_cache' in globals():
-                    _counts_cache.pop(db_name, None)
-                    _counts_cache_time.pop(db_name, None)
-            else:
-                cursor.execute("DELETE FROM schema_counts")
-                message = "All caches cleared (both schema and counts)"
-                # Also clear old in-memory cache if exists
-                if '_counts_cache' in globals():
-                    _counts_cache.clear()
-                    _counts_cache_time.clear()
-            
-            conn.commit()
-            conn.close()
-            
-            return jsonify({
-                "success": True,
-                "message": message
-            })
-    
-    except Exception as e:
-        return jsonify({"success": False, "error": str(e)}), 500
-
 @app.route('/api/inspect', methods=['GET'])
 def api_inspect_database():
     """Return database schema information (API-based mode)."""
     try:
         db_name = request.args.get('database') or 'zigment'
         
-        # In API mode, return simplified schema from API
-        schema_data = fetch_schema_from_api()
+        # Use hardcoded schema
+        schema_data = get_hardcoded_schema()
         
         # Format it similar to old inspect format for compatibility
         preview = {}
@@ -5658,7 +5765,7 @@ def api_inspect_database():
     except Exception as e:
         return jsonify({"success": False, "error": str(e)}), 500
 
-# Old SQL-based inspect code removed - API mode only
+# Old database inspection code removed - API mode only
 
 @app.route('/api/ping', methods=['GET'])
 def api_ping():
