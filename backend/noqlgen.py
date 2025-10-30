@@ -17,7 +17,7 @@ API_HEADERS = {
     "Accept-Encoding": "gzip, deflate, br",
     "Connection": "keep-alive",
     "x-org-id": "64dce1d5e1bed3c6117f78ae",
-    "zigment-x-api-key": "sk_7835f5a00766f965476190821229b452"
+    "zigment-x-api-key": os.getenv("ZIGMENT_API_KEY", "")
 }
 
 def simplify_schema_for_noql(full_schema: dict) -> dict:

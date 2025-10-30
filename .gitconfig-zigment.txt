@@ -1,0 +1,3 @@
+[user]
+    name = Adithya Zigment
+    email = adithya@zigment.ai

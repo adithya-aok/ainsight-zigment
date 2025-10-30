@@ -30,7 +30,7 @@ API_HEADERS = {
     "Accept-Encoding": "gzip, deflate, br",
     "Connection": "keep-alive",
     "x-org-id": "6617aafc195dea3f1dbdd894",
-    "zigment-x-api-key": "sk_5b1960bfac64b7e2c7f91f2383a11ff3"
+    "zigment-x-api-key": os.getenv("ZIGMENT_API_KEY", "")
 }
 
 # NoQL Direct Prompt for complex query generation
